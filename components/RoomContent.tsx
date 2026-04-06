@@ -79,7 +79,7 @@ export default function RoomContent() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [roomId]);
 
-  const copyCode = () => {
+  const handleLeave = () => {
     // Stop any playing video/audio before navigating
     document.querySelectorAll("video, audio").forEach((el) => {
       (el as HTMLMediaElement).pause();
