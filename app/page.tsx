@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRoomStore } from "@/lib/store";
 
@@ -18,6 +18,14 @@ const badges = [
 ];
 
 export default function Home() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#0a0a0a]" />}>
+      <HomeContent />
+    </Suspense>
+  );
+}
+
+function HomeContent() {
   const router = useRouter();
   const { setUsername, setRoomId } = useRoomStore();
   const [name, setName] = useState("");
