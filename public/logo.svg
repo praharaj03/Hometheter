@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="48" fill="#0a0a0a" stroke="#e50914" stroke-width="2"/>
+
+  <!-- Screen / display -->
+  <rect x="18" y="28" width="64" height="38" rx="4" fill="#1a1a1a" stroke="#e50914" stroke-width="2"/>
+  <!-- Screen glare -->
+  <rect x="22" y="32" width="56" height="30" rx="2" fill="#111"/>
+  <!-- Play triangle -->
+  <polygon points="42,40 42,56 60,48" fill="#e50914"/>
+
+  <!-- Speaker stand -->
+  <rect x="44" y="66" width="12" height="4" rx="1" fill="#e50914"/>
+  <rect x="38" y="70" width="24" height="3" rx="1.5" fill="#333"/>
+
+  <!-- Sound waves left -->
+  <path d="M14 44 Q10 48 14 52" stroke="#e50914" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+  <path d="M9 40 Q3 48 9 56" stroke="#e50914" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.5"/>
+
+  <!-- Sound waves right -->
+  <path d="M86 44 Q90 48 86 52" stroke="#e50914" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+  <path d="M91 40 Q97 48 91 56" stroke="#e50914" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.5"/>
+</svg>

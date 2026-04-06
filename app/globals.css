@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+/* Ambient blur orbs */
+.blur-orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.18;
+  pointer-events: none;
+  z-index: 0;
+  animation: orb-float linear infinite;
+}
+.blur-orb-1 {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, #7c3aed, transparent 70%);
+  top: -100px;
+  left: -100px;
+  animation-duration: 18s;
+  animation-name: orb-float-1;
+}
+.blur-orb-2 {
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, #2563eb, transparent 70%);
+  bottom: -80px;
+  right: -80px;
+  animation-duration: 22s;
+  animation-name: orb-float-2;
+}
+.blur-orb-3 {
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, #db2777, transparent 70%);
+  top: 40%;
+  left: 50%;
+  animation-duration: 26s;
+  animation-name: orb-float-3;
+}
+
+@keyframes orb-float-1 {
+  0%   { transform: translate(0px, 0px); }
+  25%  { transform: translate(120px, 80px); }
+  50%  { transform: translate(60px, 160px); }
+  75%  { transform: translate(-60px, 80px); }
+  100% { transform: translate(0px, 0px); }
+}
+@keyframes orb-float-2 {
+  0%   { transform: translate(0px, 0px); }
+  25%  { transform: translate(-100px, -60px); }
+  50%  { transform: translate(-40px, -140px); }
+  75%  { transform: translate(80px, -60px); }
+  100% { transform: translate(0px, 0px); }
+}
+@keyframes orb-float-3 {
+  0%   { transform: translate(0px, 0px); }
+  33%  { transform: translate(80px, -100px); }
+  66%  { transform: translate(-80px, -60px); }
+  100% { transform: translate(0px, 0px); }
+}
+
+body {
+  background: #141414;
+  color: #e5e5e5;
+  font-family: 'Inter', sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Range input */
+input[type="range"] {
+  -webkit-appearance: none;
+  background: #3f3f46;
+  border-radius: 4px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+}
