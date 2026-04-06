@@ -96,6 +96,8 @@ export default function RoomContent() {
       (el as HTMLMediaElement).src = "";
     });
     socketRef.current.emit("end-room");
+    resetJoin(roomId);
+    router.push("/");
   };
 
   const copyCode = () => {
