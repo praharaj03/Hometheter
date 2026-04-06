@@ -189,6 +189,7 @@ export default function VideoPlayer({ socket, isOwner, getLiveState }: Props) {
     setDuration(0);
     setCurrentTime(0);
     setLocalSrc("");
+    setVideoState({ src: url, playing: false, currentTime: 0 });
     emit({ src: url, playing: false, currentTime: 0 });
     setShowUrlInput(false);
     setUrlInput("");
@@ -197,11 +198,10 @@ export default function VideoPlayer({ socket, isOwner, getLiveState }: Props) {
   const togglePlay = () => {
     if (!isOwner) return;
     const playing = !videoState.playing;
-    const currentTime = isYouTube
+    const ct = isYouTube
       ? (ytPlayerRef.current?.getCurrentTime?.() ?? videoState.currentTime)
       : (videoRef.current?.currentTime ?? videoState.currentTime);
-    setVideoState({ playing, currentTime });
-    emit({ playing, currentTime });
+    emit({ playing, currentTime: ct });
   };
 
   const seek = (delta: number) => {
