@@ -68,6 +68,36 @@ export default function RoomContent() {
     };
   }, [roomId]);
 
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      document.querySelectorAll("video, audio").forEach((el) => {
+        (el as HTMLMediaElement).pause();
+      });
+      socketRef.current.emit("leave-room");
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [roomId]);
+
+  const copyCode = () => {
+    // Stop any playing video/audio before navigating
+    document.querySelectorAll("video, audio").forEach((el) => {
+      (el as HTMLMediaElement).pause();
+      (el as HTMLMediaElement).src = "";
+    });
+    socketRef.current.emit("leave-room");
+    resetJoin(roomId);
+    router.push("/");
+  };
+
+  const handleEndRoom = () => {
+    document.querySelectorAll("video, audio").forEach((el) => {
+      (el as HTMLMediaElement).pause();
+      (el as HTMLMediaElement).src = "";
+    });
+    socketRef.current.emit("end-room");
+  };
+
   const copyCode = () => {
     navigator.clipboard.writeText(roomId);
     setCopied(true);
@@ -125,7 +155,7 @@ export default function RoomContent() {
           <CallManager socket={socketRef.current} roomId={roomId} />
           {isOwner ? (
             <button
-              onClick={() => socketRef.current.emit("end-room")}
+              onClick={handleEndRoom}
               className="flex items-center gap-1 bg-red-900/60 hover:bg-red-800 border border-red-700 px-2 sm:px-3 py-1.5 rounded-lg text-[10px] sm:text-xs text-red-300 transition-all"
             >
               <DoorOpen size={12} />
@@ -133,7 +163,7 @@ export default function RoomContent() {
             </button>
           ) : (
             <button
-              onClick={() => { socketRef.current.emit("leave-room"); resetJoin(roomId); router.push("/"); }}
+              onClick={handleLeave}
               className="flex items-center gap-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 px-2 sm:px-3 py-1.5 rounded-lg text-[10px] sm:text-xs text-zinc-300 transition-all"
             >
               <DoorOpen size={12} />
