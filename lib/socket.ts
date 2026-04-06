@@ -6,7 +6,8 @@ let endHandler: (() => void) | null = null;
 
 export const getSocket = (): Socket => {
   if (!socket) {
-    socket = io({ path: "/socket.io", autoConnect: true });
+    const serverUrl = process.env.NEXT_PUBLIC_SOCKET_URL || "";
+    socket = io(serverUrl, { path: "/socket.io", autoConnect: true });
   }
   return socket;
 };
