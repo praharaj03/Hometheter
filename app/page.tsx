@@ -1,11 +1,13 @@
 "use client";
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState } from "react";
+import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRoomStore } from "@/lib/store";
 
 function generateRoomId(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from({ length: 16 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const random = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(random, (value) => chars[value % chars.length]).join("");
 }
 
 const badges = [
@@ -31,26 +33,48 @@ function HomeContent() {
   const [name, setName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const searchParams = useSearchParams();
-  const [tab, setTab] = useState<"create" | "join">("create");
-
-  useEffect(() => {
-    if (searchParams.get("tab") === "join") setTab("join");
-    else setTab("create");
-  }, [searchParams]);
+  const [tab, setTab] = useState<"create" | "join">(() =>
+    searchParams.get("tab") === "join" ? "join" : "create"
+  );
+  const [error, setError] = useState("");
 
   const handleCreate = () => {
-    if (!name.trim()) return;
+    if (!name.trim()) {
+      setError("Enter your name to create a room.");
+      return;
+    }
     const id = generateRoomId();
+    try {
+      sessionStorage.setItem(`hometheater:${id}:owner`, crypto.randomUUID());
+      sessionStorage.setItem(`hometheater:${id}:participant`, crypto.randomUUID());
+    } catch {
+      setError("Your browser could not save the room session. Enable session storage and try again.");
+      return;
+    }
     setUsername(name.trim());
     setRoomId(id);
-    router.push(`/room/${id}?owner=true`);
+    router.push(`/room/${id}`);
   };
 
   const handleJoin = () => {
-    if (!name.trim() || joinCode.length !== 16) return;
+    if (!name.trim()) {
+      setError("Enter your name to join a room.");
+      return;
+    }
+    const id = joinCode.trim();
+    if (!/^[A-Za-z0-9]{16}$/.test(id)) {
+      setError("Enter the 16-character room code.");
+      return;
+    }
+    try {
+      sessionStorage.setItem(`hometheater:${id}:participant`, crypto.randomUUID());
+    } catch {
+      setError("Your browser could not save the room session. Enable session storage and try again.");
+      return;
+    }
     setUsername(name.trim());
-    setRoomId(joinCode);
-    router.push(`/room/${joinCode}`);
+    setRoomId(id);
+    router.push(`/room/${id}`);
   };
 
   return (
@@ -116,7 +140,8 @@ function HomeContent() {
               style={{ background: "#2a2a2a", border: "1px solid #3a3a3a", color: "#e5e5e5" }}
               placeholder="Your name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              maxLength={32}
+              onChange={(e) => { setName(e.target.value); setError(""); }}
               onKeyDown={(e) => e.key === "Enter" && (tab === "create" ? handleCreate() : handleJoin())}
               onFocus={(e) => (e.target.style.borderColor = "#e50914")}
               onBlur={(e) => (e.target.style.borderColor = "#3a3a3a")}
@@ -129,13 +154,14 @@ function HomeContent() {
                 placeholder="16-digit room code"
                 maxLength={16}
                 value={joinCode}
-                onChange={(e) => setJoinCode(e.target.value)}
+                onChange={(e) => { setJoinCode(e.target.value); setError(""); }}
                 onKeyDown={(e) => e.key === "Enter" && handleJoin()}
                 onFocus={(e) => (e.target.style.borderColor = "#e50914")}
                 onBlur={(e) => (e.target.style.borderColor = "#3a3a3a")}
               />
             )}
 
+            {error && <p role="alert" className="mb-2 text-xs text-red-400">{error}</p>}
             <button
               onClick={tab === "create" ? handleCreate : handleJoin}
               className="w-full font-bold py-3.5 rounded-xl text-sm mt-1 transition-all active:scale-95"
@@ -153,10 +179,12 @@ function HomeContent() {
         {/* RIGHT — illustration */}
         <div className="hidden lg:flex w-1/2 h-full items-center justify-center p-6">
           <div className="relative w-full rounded-3xl overflow-hidden" style={{ border: "1px solid rgba(229,9,20,0.15)", boxShadow: "0 0 80px rgba(229,9,20,0.08)" }}>
-            <img
+            <Image
               src="/s.png"
               alt="Friends watching movie together"
-              className="w-full h-full object-cover"
+              width={1400}
+              height={900}
+              className="w-full h-auto object-cover"
             />
           </div>
         </div>

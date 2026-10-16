@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { Socket } from "socket.io-client";
 import { useRoomStore } from "@/lib/store";
-import { UserMinus } from "lucide-react";
+import { LockKeyhole, LockKeyholeOpen } from "lucide-react";
 
 interface Props {
   isOwner: boolean;
@@ -46,7 +46,6 @@ export default function UserList({ isOwner, socket }: Props) {
   const [pings, setPings] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    if (socket.id) setMySocketId(socket.id);
     const onConnect = () => setMySocketId(socket.id ?? "");
     socket.on("connect", onConnect);
     return () => { socket.off("connect", onConnect); };
@@ -82,12 +81,12 @@ export default function UserList({ isOwner, socket }: Props) {
         {users.length} participant{users.length !== 1 ? "s" : ""}
       </p>
       {users.map((u) => {
-        const isMe = u.id === mySocketId;
+        const isMe = u.isConnected && u.id === mySocketId;
         const ping = pings[u.id] ?? null;
         const pingColor = ping !== null ? getPingColor(ping) : "text-zinc-600";
 
         return (
-          <div key={u.id} className="flex items-center gap-3 py-2">
+          <div key={u.uid ?? u.id} className={`flex items-center gap-3 py-2 ${u.isConnected === false ? "opacity-60" : ""}`}>
             {/* Avatar */}
             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm shrink-0 ${u.isOwner ? "bg-red-900/60 border border-red-700/60" : "bg-zinc-800"}`}>
               {u.username[0]?.toUpperCase()}
@@ -99,6 +98,7 @@ export default function UserList({ isOwner, socket }: Props) {
                 {u.username}
                 {u.isOwner && <span className="ml-1.5 text-[10px] font-normal text-red-400">owner</span>}
                 {isMe && <span className="ml-1.5 text-[10px] text-zinc-500">you</span>}
+                {u.isConnected === false && <span className="ml-1.5 text-[10px] text-zinc-500">offline</span>}
               </span>
               {u.uid && <span className="text-[10px] font-mono text-zinc-600">{u.uid}</span>}
             </div>
@@ -115,14 +115,14 @@ export default function UserList({ isOwner, socket }: Props) {
               )}
             </div>
 
-            {/* Kick button (owner only, not self) */}
+            {/* Owner-only temporary interaction restriction */}
             {isOwner && !isMe && (
               <button
-                onClick={() => socket.emit("kick-user", { participantId: u.id })}
-                className="text-zinc-600 hover:text-red-500 transition-colors shrink-0"
-                title="Remove participant"
+                onClick={() => u.uid && socket.emit("set-blocked", { participantId: u.uid, blocked: !u.isBlocked })}
+                className={`transition-colors shrink-0 ${u.isBlocked ? "text-amber-400 hover:text-amber-300" : "text-zinc-600 hover:text-amber-400"}`}
+                title={u.isBlocked ? "Unblock participant" : "Temporarily block chat and controls"}
               >
-                <UserMinus size={14} />
+                {u.isBlocked ? <LockKeyholeOpen size={14} /> : <LockKeyhole size={14} />}
               </button>
             )}
           </div>

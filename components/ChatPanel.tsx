@@ -11,7 +11,7 @@ interface Props {
 }
 
 export default function ChatPanel({ socket }: Props) {
-  const { messages, username } = useRoomStore();
+  const { messages, username, isBlocked } = useRoomStore();
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -21,8 +21,8 @@ export default function ChatPanel({ socket }: Props) {
 
   const send = () => {
     const safe = sanitizeInput(input, 500);
-    if (!safe) return;
-    socket.emit("chat-message", { message: safe, username });
+    if (!safe || isBlocked) return;
+    socket.emit("chat-message", { message: safe });
     setInput("");
   };
 
@@ -59,15 +59,17 @@ export default function ChatPanel({ socket }: Props) {
 
       <div className="border-t border-zinc-800 p-3 flex gap-2">
         <input
-          className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-zinc-500 placeholder-zinc-600"
+          className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-zinc-500 placeholder-zinc-600 disabled:opacity-50"
           placeholder="Message..."
           value={input}
           maxLength={500}
+          disabled={isBlocked}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
         />
         <button
           onClick={send}
+          disabled={isBlocked}
           className="bg-white text-black p-2 rounded-xl hover:bg-zinc-200 transition-all"
         >
           <Send size={15} />

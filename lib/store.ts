@@ -5,6 +5,8 @@ export interface User {
   username: string;
   uid?: string;
   isOwner?: boolean;
+  isBlocked?: boolean;
+  isConnected?: boolean;
 }
 
 export interface ChatMessage {
@@ -26,11 +28,13 @@ interface RoomStore {
   users: User[];
   messages: ChatMessage[];
   videoState: VideoState;
+  isBlocked: boolean;
   setUsername: (name: string) => void;
   setRoomId: (id: string) => void;
   setUsers: (users: User[]) => void;
   addMessage: (msg: ChatMessage) => void;
   setVideoState: (state: Partial<VideoState>) => void;
+  setIsBlocked: (blocked: boolean) => void;
 }
 
 export const useRoomStore = create<RoomStore>((set) => ({
@@ -39,10 +43,18 @@ export const useRoomStore = create<RoomStore>((set) => ({
   users: [],
   messages: [],
   videoState: { src: "", playing: false, currentTime: 0, speed: 1 },
+  isBlocked: false,
   setUsername: (username) => set({ username }),
-  setRoomId: (roomId) => set({ roomId }),
+  setRoomId: (roomId) => set((state) => roomId === state.roomId ? { roomId } : {
+    roomId,
+    users: [],
+    messages: [],
+    isBlocked: false,
+    videoState: { src: "", playing: false, currentTime: 0, speed: 1 },
+  }),
   setUsers: (users) => set({ users: users.filter((u, i, arr) => arr.findIndex(x => x.id === u.id) === i) }),
-  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg].slice(-500) })),
   setVideoState: (state) =>
     set((s) => ({ videoState: { ...s.videoState, ...state } })),
+  setIsBlocked: (isBlocked) => set({ isBlocked }),
 }));
