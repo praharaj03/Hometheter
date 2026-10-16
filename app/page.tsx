@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowRight, Check, Clapperboard, Copy, Link2, LockKeyhole, Play, Radio, Users } from "lucide-react";
+import { ArrowRight, Check, Clapperboard, Copy, Link2, LockKeyhole, MessageCircle, Play, Radio, ShieldCheck, Upload, Users, X } from "lucide-react";
 import { useRoomStore } from "@/lib/store";
 
 function generateRoomId(): string {
@@ -28,6 +28,7 @@ function HomeContent() {
   const [joinCode, setJoinCode] = useState("");
   const [tab, setTab] = useState<"create" | "join">(() => searchParams.get("tab") === "join" ? "join" : "create");
   const [error, setError] = useState("");
+  const [showGuide, setShowGuide] = useState(false);
 
   const enterRoom = (action: "create" | "join") => {
     if (!name.trim()) {
@@ -77,7 +78,13 @@ function HomeContent() {
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,.7)]" />
             Made for movie nights
           </div>
-          <a href="#how-it-works" className="text-xs font-medium text-zinc-400 transition-colors hover:text-white">How it works</a>
+          <button
+            type="button"
+            onClick={() => setShowGuide(true)}
+            className="rounded-lg px-2 py-2 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-white"
+          >
+            How it works
+          </button>
         </header>
 
         <div className="grid flex-1 items-center gap-12 py-12 lg:grid-cols-[minmax(0,1.1fr)_minmax(380px,0.9fr)] lg:gap-20 lg:py-16">
@@ -199,6 +206,102 @@ function HomeContent() {
           HomeTheater <span className="mx-2 text-zinc-800">/</span> Make the distance feel smaller.
         </footer>
       </div>
+
+      {showGuide && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-guide-in"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowGuide(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setShowGuide(false);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="guide-title"
+            className="relative max-h-[min(88dvh,760px)] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/[0.1] bg-[#111114] p-5 shadow-[0_30px_120px_rgba(0,0,0,.7)] sm:p-8"
+          >
+            <button
+              type="button"
+              onClick={() => setShowGuide(false)}
+              aria-label="Close how it works"
+              className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.035] text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white"
+            >
+              <X size={17} />
+            </button>
+
+            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-red-300">Your watch party, step by step</p>
+            <h2 id="guide-title" className="mt-2 pr-10 text-2xl font-semibold tracking-tight sm:text-3xl">How HomeTheater works</h2>
+            <p className="mt-2 max-w-lg text-xs leading-5 text-zinc-500">Create a private room, invite your people, and let the host control the movie.</p>
+
+            <ol className="mt-7 space-y-3">
+              {[
+                {
+                  icon: Users,
+                  title: "Create a room or join one",
+                  detail: "Enter your name. Create a room to host, or choose Join a room and enter the 16-character code your host shared.",
+                  color: "text-red-300",
+                  tint: "bg-red-400/[0.08]",
+                },
+                {
+                  icon: Copy,
+                  title: "Invite friends with the room code",
+                  detail: "The host copies the code from the room header and sends it to friends. Rooms allow up to 50 people, including the host.",
+                  color: "text-violet-300",
+                  tint: "bg-violet-400/[0.08]",
+                },
+                {
+                  icon: Upload,
+                  title: "Load something to watch",
+                  detail: "The host uploads a local video or audio file, pastes a direct media URL, or shares an embeddable YouTube link. Use browser-compatible formats such as H.264/AAC MP4 or WebM.",
+                  color: "text-sky-300",
+                  tint: "bg-sky-400/[0.08]",
+                },
+                {
+                  icon: Play,
+                  title: "Watch in sync",
+                  detail: "The host controls shared play, pause, seeking, and speed. Participants can pause only their own playback; resuming syncs them to the host's latest position.",
+                  color: "text-emerald-300",
+                  tint: "bg-emerald-400/[0.08]",
+                },
+                {
+                  icon: MessageCircle,
+                  title: "Chat and manage the room",
+                  detail: "Everyone can chat. The host can temporarily block or unblock a participant's chat and playback controls. When the host leaves, the room closes for everyone.",
+                  color: "text-amber-300",
+                  tint: "bg-amber-400/[0.08]",
+                },
+              ].map(({ icon: Icon, title, detail, color, tint }, index) => (
+                <li key={title} className="flex gap-3.5 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-3.5 sm:gap-4 sm:p-4">
+                  <span className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${tint} ${color}`}>
+                    <Icon size={17} />
+                    <span className="absolute -left-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-[#111114] bg-zinc-800 text-[9px] font-semibold text-zinc-300">{index + 1}</span>
+                  </span>
+                  <div className="min-w-0 pt-0.5">
+                    <h3 className="text-xs font-semibold text-zinc-100 sm:text-sm">{title}</h3>
+                    <p className="mt-1.5 text-[11px] leading-5 text-zinc-500 sm:text-xs">{detail}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+
+            <div className="mt-5 flex items-start gap-2.5 rounded-xl border border-white/[0.06] bg-black/20 p-3.5">
+              <ShieldCheck size={15} className="mt-0.5 shrink-0 text-zinc-500" />
+              <p className="text-[10px] leading-5 text-zinc-500">No account is needed. Local uploads are sent to the room backend and are temporary; on Render Free, files may disappear when its service restarts.</p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowGuide(false)}
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-200"
+            >
+              Got it <Check size={15} />
+            </button>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
