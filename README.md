@@ -1,6 +1,7 @@
 # HomeTheater
 
 Watch the same media together in a room. The room owner controls playback, participants can chat, and the owner can temporarily block or unblock a participant's chat and controls.
+Rooms support up to 10 connected people, including the owner. The owner sees how many people are present and how many places remain.
 
 ## Run locally
 
@@ -21,16 +22,20 @@ Copy `.env.example` to `.env` for local development. Open `http://localhost:3000
 
 ## Shared media and playback
 
-- The owner can load a public, embeddable YouTube link or a direct HTTP(S) video URL. Each participant plays the same URL and follows the owner's play, pause, seek, and speed changes.
+- The owner can load a public, embeddable YouTube link or a direct HTTP(S) video URL. Each participant plays the same URL and follows the owner's shared play, pause, seek, and speed changes.
+- Participants can pause playback locally; resuming them seeks to the latest owner-controlled playback state. When the owner leaves or disconnects, the room closes and participants are returned home.
 - For a local video or audio file, the owner uploads the original file to the room server. It is stored without transcoding and streamed to participants with byte-range support, so seeking works and the source is not recompressed. The upload limit is 2 GB.
+- The player presents media in a centered 16:9 frame on every screen. Source video is contained inside the frame rather than cropped; sources with a different shape may show letterboxing.
+- For widest browser support, use MP4 encoded with H.264 video and AAC audio, or WebM. The app does not transcode unsupported codecs/containers.
 - YouTube chooses quality using its own player. Local uploads and direct URLs retain their original source quality; this app does not transcode them into adaptive bitrates. On a slow connection, playback may buffer rather than automatically switch to a lower-quality version.
+- The player displays a loading indicator while media is being prepared or buffering.
 - DRM-protected or non-embeddable services cannot be played through the YouTube embed or as a direct video URL.
 
 Local uploads use the backend's temporary directory and are removed when the room ends. Room and media state are held in process memory; a backend restart ends rooms and loses their media. Run a single backend instance for rooms. Multiple backend replicas require shared room coordination and shared media storage.
 
 ## Room controls
 
-Only the room owner can change playback, block/unblock participants, or end the room. A blocked participant can continue watching and can leave, but cannot chat or send room interaction events. Blocking remains in effect if that participant temporarily disconnects and reconnects to the same room.
+Only the owner can change shared playback, block/unblock participants, or end the room. Participants may pause locally and resuming them follows the shared owner state. A blocked participant can continue watching and can leave, but cannot chat or control playback. Blocking remains in effect if that participant temporarily disconnects and reconnects to the same room.
 
 Voice and video calls are not part of the app.
 

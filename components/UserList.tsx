@@ -9,6 +9,8 @@ interface Props {
   socket: Socket;
 }
 
+const ROOM_CAPACITY = 10;
+
 function getPingColor(ping: number) {
   if (ping < 80) return "text-green-400";
   if (ping < 200) return "text-yellow-400";
@@ -42,6 +44,8 @@ function SignalIcon({ bars, color }: { bars: number; color: string }) {
 
 export default function UserList({ isOwner, socket }: Props) {
   const { users } = useRoomStore();
+  const presentCount = users.filter((user) => user.isConnected !== false).length;
+  const openSeats = Math.max(ROOM_CAPACITY - presentCount, 0);
   const [mySocketId, setMySocketId] = useState(socket.id ?? "");
   const [pings, setPings] = useState<Record<string, number>>({});
 
@@ -76,31 +80,46 @@ export default function UserList({ isOwner, socket }: Props) {
   }, [socket]);
 
   return (
-    <div className="p-4 space-y-1">
-      <p className="text-xs text-zinc-500 mb-3">
-        {users.length} participant{users.length !== 1 ? "s" : ""}
-      </p>
+    <div className="p-4">
+      <div className="mb-5 rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4">
+        <div className="mb-3 flex items-end justify-between">
+          <div>
+            <p className="text-sm font-semibold text-white">{presentCount} of {ROOM_CAPACITY} here</p>
+            <p className="mt-1 text-xs text-zinc-500">{isOwner ? `${openSeats} ${openSeats === 1 ? "spot" : "spots"} left to invite` : "Room capacity"}</p>
+          </div>
+          <span className="text-xs font-medium tabular-nums text-zinc-400">{presentCount}/{ROOM_CAPACITY}</span>
+        </div>
+        <div className="flex gap-1.5" aria-label={`${openSeats} open spots`}>
+          {Array.from({ length: ROOM_CAPACITY }, (_, index) => (
+            <span key={index} className={`h-1.5 flex-1 rounded-full transition-colors ${index < presentCount ? "bg-red-500" : "bg-white/10"}`} />
+          ))}
+        </div>
+      </div>
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">In this room</p>
+        <span className="text-[10px] text-zinc-600">{users.length} total</span>
+      </div>
       {users.map((u) => {
         const isMe = u.isConnected && u.id === mySocketId;
         const ping = pings[u.id] ?? null;
         const pingColor = ping !== null ? getPingColor(ping) : "text-zinc-600";
 
         return (
-          <div key={u.uid ?? u.id} className={`flex items-center gap-3 py-2 ${u.isConnected === false ? "opacity-60" : ""}`}>
+          <div key={u.uid ?? u.id} className={`group flex items-center gap-3 rounded-xl px-2.5 py-3 transition-colors hover:bg-white/[0.035] ${u.isConnected === false ? "opacity-50" : ""}`}>
             {/* Avatar */}
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm shrink-0 ${u.isOwner ? "bg-red-900/60 border border-red-700/60" : "bg-zinc-800"}`}>
+            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ${u.isOwner ? "border border-red-400/20 bg-red-500/10 text-red-300" : "border border-white/[0.06] bg-white/[0.06] text-zinc-300"}`}>
               {u.username[0]?.toUpperCase()}
             </div>
 
             {/* Name + uid */}
             <div className="flex flex-col min-w-0 flex-1">
-              <span className={`text-sm truncate ${u.isOwner ? "font-bold text-white" : "text-zinc-300"}`}>
+              <span className={`truncate text-xs font-medium ${u.isOwner ? "text-white" : "text-zinc-300"}`}>
                 {u.username}
                 {u.isOwner && <span className="ml-1.5 text-[10px] font-normal text-red-400">owner</span>}
                 {isMe && <span className="ml-1.5 text-[10px] text-zinc-500">you</span>}
                 {u.isConnected === false && <span className="ml-1.5 text-[10px] text-zinc-500">offline</span>}
               </span>
-              {u.uid && <span className="text-[10px] font-mono text-zinc-600">{u.uid}</span>}
+              {u.uid && <span className="mt-0.5 text-[10px] font-mono text-zinc-600">{u.uid}</span>}
             </div>
 
             {/* Ping + signal for all users */}
@@ -119,7 +138,7 @@ export default function UserList({ isOwner, socket }: Props) {
             {isOwner && !isMe && (
               <button
                 onClick={() => u.uid && socket.emit("set-blocked", { participantId: u.uid, blocked: !u.isBlocked })}
-                className={`transition-colors shrink-0 ${u.isBlocked ? "text-amber-400 hover:text-amber-300" : "text-zinc-600 hover:text-amber-400"}`}
+                className={`rounded-lg p-2 transition-colors ${u.isBlocked ? "text-amber-400 hover:bg-amber-400/10 hover:text-amber-300" : "text-zinc-600 hover:bg-white/[0.06] hover:text-amber-400"}`}
                 title={u.isBlocked ? "Unblock participant" : "Temporarily block chat and controls"}
               >
                 {u.isBlocked ? <LockKeyholeOpen size={14} /> : <LockKeyhole size={14} />}

@@ -11,6 +11,7 @@ import {
 interface Props {
   socket: Socket;
   isOwner: boolean;
+  isBlocked: boolean;
   roomId: string;
   onLiveState: (provider: (() => object) | null) => void;
 }
@@ -75,16 +76,19 @@ function isSafeUrl(url: string): boolean {
   }
 }
 
-export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Props) {
+export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLiveState }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const ytPlayerRef = useRef<YouTubePlayer | null>(null);
   const ytContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSyncing = useRef(false);
-  const videoStateRef = useRef(useRoomStore.getState().videoState);
-
   const { videoState } = useRoomStore();
+  const videoStateRef = useRef(useRoomStore.getState().videoState);
+  const locallyPausedRef = useRef(false);
+  const awaitingPlaybackSync = useRef(false);
+  const lastSource = useRef(videoState.src);
+
   const [urlInput, setUrlInput] = useState("");
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -96,6 +100,8 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   const [videoError, setVideoError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const [locallyPaused, setLocallyPaused] = useState(false);
+  const [isMediaLoading, setIsMediaLoading] = useState(false);
 
   const ytId = getYouTubeId(videoState.src);
   const isYouTube = !!ytId;
@@ -104,6 +110,29 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   useEffect(() => {
     videoStateRef.current = videoState;
   }, [videoState]);
+
+  useEffect(() => {
+    if (lastSource.current === videoState.src) return;
+    lastSource.current = videoState.src;
+    locallyPausedRef.current = false;
+    awaitingPlaybackSync.current = false;
+    setLocallyPaused(false);
+    setIsMediaLoading(Boolean(videoState.src));
+  }, [videoState.src]);
+
+  useEffect(() => {
+    const receivePlaybackSync = (state: VideoState) => {
+      if (isOwner) return;
+      awaitingPlaybackSync.current = false;
+      locallyPausedRef.current = false;
+      setLocallyPaused(false);
+      useRoomStore.getState().setVideoState(state);
+    };
+    socket.on("playback-sync", receivePlaybackSync);
+    return () => {
+      socket.off("playback-sync", receivePlaybackSync);
+    };
+  }, [isOwner, socket]);
 
   const emit = useCallback((state: Partial<VideoState>) => {
     socket.emit("video-state", state);
@@ -124,6 +153,10 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
     if (document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) return;
     const tag = document.createElement("script");
     tag.src = "https://www.youtube.com/iframe_api";
+    tag.onerror = () => {
+      setIsMediaLoading(false);
+      setVideoError("The YouTube player could not load. Check your connection and try again.");
+    };
     document.head.appendChild(tag);
   }, [isYouTube]);
 
@@ -149,6 +182,7 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
         events: {
           onReady: (event: YouTubeEvent) => {
             setPlaybackBlocked(false);
+            setIsMediaLoading(false);
             setDuration(event.target.getDuration());
             const state = videoStateRef.current;
             if (state.currentTime > 0) event.target.seekTo(state.currentTime, true);
@@ -159,12 +193,17 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
             setVideoError("Your browser needs a user gesture before it can play media.");
           },
           onStateChange: (event: YouTubeEvent) => {
+            if (event.data === 3) setIsMediaLoading(true);
+            else if (event.data === 1 || event.data === 2 || event.data === 5) setIsMediaLoading(false);
             if (!isOwner || !window.YT) return;
             const state = window.YT.PlayerState;
             if (event.data === state.PLAYING) emit({ playing: true, currentTime: event.target.getCurrentTime() });
             if (event.data === state.PAUSED) emit({ playing: false, currentTime: event.target.getCurrentTime() });
           },
-          onError: () => setVideoError("This YouTube video cannot be embedded or played."),
+          onError: () => {
+            setIsMediaLoading(false);
+            setVideoError("This YouTube video cannot be embedded or played.");
+          },
         },
       });
     };
@@ -175,15 +214,17 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   useEffect(() => {
     const player = ytPlayerRef.current;
     if (!player || !isYouTube || !window.YT) return;
+    if (!isOwner && (locallyPausedRef.current || awaitingPlaybackSync.current)) return;
     const state = videoStateRef.current;
     if (Math.abs(player.getCurrentTime() - state.currentTime) > 1.5) player.seekTo(state.currentTime, true);
     if (state.playing && player.getPlayerState() !== window.YT.PlayerState.PLAYING) player.playVideo();
     if (!state.playing && player.getPlayerState() === window.YT.PlayerState.PLAYING) player.pauseVideo();
-  }, [isYouTube, videoState]);
+  }, [isOwner, isYouTube, videoState]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoState.src || isYouTube) return;
+    if (!isOwner && (locallyPausedRef.current || awaitingPlaybackSync.current)) return;
     isSyncing.current = true;
     if (Math.abs(video.currentTime - videoState.currentTime) > 1.5) video.currentTime = videoState.currentTime;
     if (videoState.playing && video.paused) {
@@ -232,9 +273,12 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
       mov: "video/quicktime", mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4",
       aac: "audio/aac", ogg: "audio/ogg",
     };
-    const contentType = file.type || fallbackTypes[extension] || "";
+    const reportedType = file.type.toLowerCase();
+    const contentType = reportedType.startsWith("video/") || reportedType.startsWith("audio/")
+      ? reportedType
+      : fallbackTypes[extension] || "";
     if (!contentType.startsWith("video/") && !contentType.startsWith("audio/")) {
-      setVideoError("Choose a video or audio file.");
+      setVideoError("This file format is not supported. Use MP4 (H.264/AAC), WebM, MP3, WAV, M4A, AAC, or OGG.");
       return;
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -269,16 +313,30 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   };
 
   const allowPlayback = () => {
+    if (isBlocked) return;
     if (ytPlayerRef.current) {
       ytPlayerRef.current.playVideo();
       setPlaybackBlocked(false);
       setVideoError("");
+      if (!isOwner) {
+        locallyPausedRef.current = false;
+        awaitingPlaybackSync.current = true;
+        setLocallyPaused(false);
+        socket.emit("request-playback-sync");
+      }
       return;
     }
     const promise = videoRef.current?.play();
     promise?.then(() => {
       setPlaybackBlocked(false);
       setVideoError("");
+      setIsMediaLoading(false);
+      if (!isOwner) {
+        locallyPausedRef.current = false;
+        awaitingPlaybackSync.current = true;
+        setLocallyPaused(false);
+        socket.emit("request-playback-sync");
+      }
     }).catch(() => {
       setPlaybackBlocked(true);
       setVideoError("Playback could not start. Check your connection and try again.");
@@ -301,7 +359,33 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   };
 
   const togglePlay = () => {
-    if (!isOwner) return;
+    if (!isOwner) {
+      if (isBlocked) return;
+      const isPlaying = isYouTube && ytPlayerRef.current && window.YT
+        ? ytPlayerRef.current.getPlayerState() === window.YT.PlayerState.PLAYING
+        : Boolean(videoRef.current && !videoRef.current.paused);
+      if (isPlaying) {
+        locallyPausedRef.current = true;
+        awaitingPlaybackSync.current = false;
+        setLocallyPaused(true);
+        ytPlayerRef.current?.pauseVideo();
+        videoRef.current?.pause();
+        return;
+      }
+
+      locallyPausedRef.current = false;
+      awaitingPlaybackSync.current = true;
+      setLocallyPaused(false);
+      if (ytPlayerRef.current) ytPlayerRef.current.playVideo();
+      else {
+        videoRef.current?.play().catch(() => {
+          setPlaybackBlocked(true);
+          setVideoError("Playback could not start. Check your connection and try again.");
+        });
+      }
+      socket.emit("request-playback-sync");
+      return;
+    }
     const playing = !videoState.playing;
     const time = ytPlayerRef.current?.getCurrentTime?.() ?? videoRef.current?.currentTime ?? videoState.currentTime;
     emit({ playing, currentTime: time });
@@ -354,37 +438,37 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div ref={containerRef} className="flex-1 flex flex-col bg-black relative overflow-hidden group">
+    <div ref={containerRef} className="flex-1 flex flex-col items-center justify-center bg-black relative overflow-hidden group">
       {isOwner && (
-        <div className="absolute top-3 left-3 right-3 z-20 flex flex-wrap gap-2">
-          <label className={`flex items-center gap-1.5 bg-black/70 backdrop-blur-md border border-white/10 px-3 py-2 rounded-xl text-xs transition-all text-zinc-300 ${uploading ? "opacity-50 cursor-wait" : "cursor-pointer hover:border-white/30 hover:text-white"}`}>
+      <div className="absolute left-3 right-3 top-3 z-20 flex flex-wrap gap-2">
+        <label className={`flex cursor-pointer items-center gap-2 rounded-xl border border-white/[0.08] bg-[#111114]/90 px-3.5 py-2.5 text-[11px] font-medium text-zinc-200 shadow-lg shadow-black/20 backdrop-blur-xl transition-colors hover:border-white/20 hover:bg-[#1b1b20] ${uploading ? "cursor-wait opacity-60" : ""}`}>
             <Upload size={13} />
-            <span>{uploading ? "Uploading original..." : "Local File"}</span>
+          <span>{uploading ? "Uploading…" : "Upload media"}</span>
             <input type="file" accept="video/*,audio/*" className="hidden" onChange={handleFileUpload} disabled={uploading} />
           </label>
           <button
             onClick={() => { setShowUrlInput((open) => !open); setVideoError(""); }}
-            className="flex items-center gap-1.5 bg-black/70 backdrop-blur-md border border-white/10 hover:border-white/30 px-3 py-2 rounded-xl text-xs transition-all text-zinc-300 hover:text-white"
+          className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#111114]/90 px-3.5 py-2.5 text-[11px] font-medium text-zinc-200 shadow-lg shadow-black/20 backdrop-blur-xl transition-colors hover:border-white/20 hover:bg-[#1b1b20]"
           >
-            <LinkIcon size={13} /> URL
+          <LinkIcon size={13} /> Add link
           </button>
           {showUrlInput && (
             <div className="flex gap-2 w-full mt-1">
               <input
                 autoFocus
-                className="flex-1 bg-zinc-900/90 backdrop-blur border border-white/10 focus:border-white/30 rounded-xl px-4 py-2 text-xs outline-none text-white placeholder-zinc-500 transition-all"
+                className="min-w-0 flex-1 rounded-xl border border-white/[0.08] bg-[#111114]/95 px-4 py-2.5 text-xs text-white outline-none backdrop-blur focus:border-red-400/40"
                 placeholder="Paste YouTube or direct video URL..."
                 value={urlInput}
                 maxLength={2048}
                 onChange={(event) => setUrlInput(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && handleUrlLoad()}
               />
-              <button onClick={handleUrlLoad} className="bg-white text-black px-4 py-2 rounded-xl text-xs font-semibold hover:bg-zinc-200 transition-all shrink-0">Load</button>
-              <button onClick={() => { setShowUrlInput(false); setVideoError(""); }} className="text-zinc-500 hover:text-white p-2"><X size={14} /></button>
+              <button onClick={handleUrlLoad} className="shrink-0 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black transition-colors hover:bg-zinc-200">Load</button>
+              <button onClick={() => { setShowUrlInput(false); setVideoError(""); }} aria-label="Close URL input" className="rounded-xl border border-white/[0.08] bg-black/40 p-2.5 text-zinc-400 transition-colors hover:text-white"><X size={14} /></button>
             </div>
           )}
           {videoError && (
-            <div role="alert" className="w-full flex items-center gap-2 bg-red-950/80 border border-red-800/50 rounded-xl px-3 py-2 text-xs text-red-400">
+            <div role="alert" className="flex w-full items-center gap-2 rounded-xl border border-red-400/20 bg-red-950/90 px-3 py-2.5 text-xs text-red-200 shadow-xl backdrop-blur-xl">
               <span>⚠️ {videoError}</span>
               <button onClick={() => setVideoError("")} className="ml-auto text-red-600 hover:text-red-400"><X size={12} /></button>
             </div>
@@ -393,63 +477,104 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
       )}
 
       <div
-        className="flex-1 flex items-center justify-center relative"
+        className="flex-1 min-h-0 w-full flex items-center justify-center relative"
         onMouseMove={showControlsTemporarily}
         onTouchStart={showControlsTemporarily}
-        onClick={isYouTube ? undefined : (isOwner ? togglePlay : playbackBlocked ? allowPlayback : undefined)}
+        onClick={isYouTube ? undefined : (isOwner ? togglePlay : isBlocked ? undefined : playbackBlocked ? allowPlayback : togglePlay)}
       >
-        {!hasSrc && (
-          <div className="text-center px-8 select-none">
-            <div className="text-7xl mb-4 opacity-30">🎬</div>
-            <p className="text-zinc-400 text-sm font-medium">{isOwner ? "Load a video to start watching" : "Waiting for owner to load a video..."}</p>
-            {isOwner && <p className="text-zinc-600 text-xs mt-2">YouTube · Direct MP4/WebM URL · Original-quality upload</p>}
-          </div>
-        )}
+        <div className="relative aspect-video w-full max-h-full overflow-hidden rounded-xl bg-[#050506] shadow-[0_18px_70px_rgba(0,0,0,.38)]">
+          {!hasSrc && (
+            <div className="absolute inset-0 flex select-none flex-col items-center justify-center px-8 text-center">
+              {uploading ? (
+                <>
+                  <span className="media-spinner mb-4" />
+                  <p className="text-sm font-medium text-zinc-200">Uploading your media…</p>
+                  <p className="mt-2 max-w-xs text-xs leading-5 text-zinc-500">Keep this room open while the original file uploads.</p>
+                </>
+              ) : (
+                <>
+                  <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-[22px] border border-white/[0.08] bg-white/[0.035] text-zinc-500 shadow-inner"><Play size={25} /></div>
+                  <p className="text-sm font-medium text-zinc-300">{isOwner ? "Your screen is ready" : "Waiting for the host to start"}</p>
+                  <p className="mt-2 max-w-xs text-xs leading-5 text-zinc-600">{isOwner ? "Upload a video or paste a supported link to begin your watch party." : "The movie will appear here as soon as the host loads it."}</p>
+                </>
+              )}
+            </div>
+          )}
 
-        {isYouTube && <div ref={ytContainerRef} className="w-full h-full" />}
-        {!isYouTube && (
-          <video
-            ref={videoRef}
-            className="max-h-full max-w-full w-full h-full object-contain"
-            src={isSafeUrl(videoState.src) ? videoState.src : undefined}
-            onTimeUpdate={() => { if (videoRef.current) setCurrentTime(videoRef.current.currentTime); }}
-            onLoadedMetadata={() => {
-              const video = videoRef.current;
-              if (!video) return;
-              setVideoError("");
-              setPlaybackBlocked(false);
-              setDuration(video.duration);
-              isSyncing.current = true;
-              if (videoStateRef.current.currentTime > 0) video.currentTime = videoStateRef.current.currentTime;
-              if (videoStateRef.current.playing) {
-                video.play().catch(() => {
-                  setPlaybackBlocked(true);
-                  setVideoError("Your browser needs a user gesture before it can play media.");
-                }).finally(() => { isSyncing.current = false; });
-              } else {
-                video.pause();
-                isSyncing.current = false;
-              }
-              video.playbackRate = videoStateRef.current.speed;
-            }}
-            onError={() => {
-              if (videoState.src) setVideoError("Cannot play this video. Try a direct .mp4/.webm URL or upload the original file.");
-            }}
-            onPlay={() => { if (!isSyncing.current) emit({ playing: true, currentTime: videoRef.current?.currentTime ?? 0 }); }}
-            onPause={() => { if (!isSyncing.current) emit({ playing: false, currentTime: videoRef.current?.currentTime ?? 0 }); }}
-          />
-        )}
-        {!isOwner && playbackBlocked && (
-          <button
-            onClick={(event) => { event.stopPropagation(); allowPlayback(); }}
-            className="absolute z-10 rounded-xl bg-black/80 border border-white/20 px-5 py-3 text-sm text-white hover:bg-black"
-          >
-            Click to start synchronized playback
-          </button>
-        )}
-        {videoError && !isOwner && !playbackBlocked && (
-          <p role="alert" className="absolute top-16 z-10 rounded-lg bg-red-950/90 px-4 py-2 text-xs text-red-200">{videoError}</p>
-        )}
+          {isYouTube && <div ref={ytContainerRef} className="absolute inset-0" />}
+          {!isOwner && !isBlocked && isYouTube && hasSrc && (
+            <button
+              onClick={togglePlay}
+              aria-label={locallyPaused || !videoState.playing ? "Resume synchronized playback" : "Pause for me"}
+              className="absolute bottom-4 right-4 z-10 rounded-lg bg-black/80 border border-white/20 p-3 text-white hover:bg-black"
+            >
+              {locallyPaused || !videoState.playing ? <Play size={18} fill="white" /> : <Pause size={18} fill="white" />}
+            </button>
+          )}
+          {!isYouTube && (
+            <video
+              ref={videoRef}
+              className="absolute inset-0 w-full h-full object-contain"
+              src={isSafeUrl(videoState.src) ? videoState.src : undefined}
+              onLoadStart={() => setIsMediaLoading(true)}
+              onWaiting={() => setIsMediaLoading(true)}
+              onStalled={() => setIsMediaLoading(true)}
+              onCanPlay={() => setIsMediaLoading(false)}
+              onPlaying={() => setIsMediaLoading(false)}
+              onTimeUpdate={() => { if (videoRef.current) setCurrentTime(videoRef.current.currentTime); }}
+              onLoadedMetadata={() => {
+                const video = videoRef.current;
+                if (!video) return;
+                setVideoError("");
+                setPlaybackBlocked(false);
+                setDuration(video.duration);
+                setIsMediaLoading(video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
+                isSyncing.current = true;
+                if (videoStateRef.current.currentTime > 0) video.currentTime = videoStateRef.current.currentTime;
+                if (videoStateRef.current.playing) {
+                  video.play().catch(() => {
+                    setPlaybackBlocked(true);
+                    setVideoError("Your browser needs a user gesture before it can play media.");
+                  }).finally(() => { isSyncing.current = false; });
+                } else {
+                  video.pause();
+                  isSyncing.current = false;
+                }
+                video.playbackRate = videoStateRef.current.speed;
+              }}
+              onError={() => {
+                setIsMediaLoading(false);
+                const mediaError = videoRef.current?.error;
+                if (!videoState.src || !mediaError) return;
+                if (mediaError.code === MediaError.MEDIA_ERR_DECODE || mediaError.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+                  setVideoError("This video codec or container is not supported by your browser. Try MP4 with H.264/AAC or WebM.");
+                } else {
+                  setVideoError("The video could not be downloaded. Check the Render upload, connection, and CORS origin settings.");
+                }
+              }}
+              onPlay={() => { if (isOwner && !isSyncing.current) emit({ playing: true, currentTime: videoRef.current?.currentTime ?? 0 }); }}
+              onPause={() => { if (isOwner && !isSyncing.current) emit({ playing: false, currentTime: videoRef.current?.currentTime ?? 0 }); }}
+            />
+          )}
+          {hasSrc && isMediaLoading && !videoError && (
+            <div role="status" aria-live="polite" className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-3 bg-black/65 text-center backdrop-blur-[2px]">
+              <span className="media-spinner" />
+              <span className="text-xs font-medium text-zinc-200">{uploading ? "Uploading your media…" : videoState.playing ? "Buffering playback…" : "Loading media…"}</span>
+              <span className="text-[10px] text-zinc-500">This can take a moment on a slow connection</span>
+            </div>
+          )}
+          {!isOwner && !isBlocked && playbackBlocked && (
+            <button
+              onClick={(event) => { event.stopPropagation(); allowPlayback(); }}
+              className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 rounded-xl border border-white/15 bg-[#111114]/95 px-5 py-3 text-xs font-medium text-white shadow-xl transition-colors hover:bg-[#1b1b20]"
+            >
+              Click to start synchronized playback
+            </button>
+          )}
+          {videoError && !isOwner && !playbackBlocked && (
+            <p role="alert" className="absolute top-2 left-2 right-2 z-10 rounded-lg bg-red-950/90 px-4 py-2 text-xs text-red-200">{videoError}</p>
+          )}
+        </div>
       </div>
 
       {hasSrc && !isYouTube && (
@@ -457,7 +582,7 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
           className={`absolute bottom-0 left-0 right-0 transition-opacity duration-300 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"}`}
           onMouseEnter={() => { setShowControls(true); if (controlsTimer.current) clearTimeout(controlsTimer.current); }}
         >
-          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent pointer-events-none" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/95 via-black/55 to-transparent" />
           <div className="relative px-4 pb-4 pt-10">
             <div className="relative mb-3 group/seek">
               <div className="h-1 bg-white/20 rounded-full overflow-hidden">
@@ -468,8 +593,8 @@ export default function VideoPlayer({ socket, isOwner, roomId, onLiveState }: Pr
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1 sm:gap-2">
                 <button onClick={() => seek(-10)} disabled={!isOwner} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipBack size={18} /></button>
-                <button onClick={togglePlay} disabled={!isOwner} className="p-2 rounded-lg text-white hover:bg-white/10 transition-all disabled:opacity-50">
-                  {videoState.playing ? <Pause size={22} fill="white" /> : <Play size={22} fill="white" />}
+                <button onClick={togglePlay} disabled={!isOwner && (isBlocked || playbackBlocked)} className="p-2 rounded-lg text-white hover:bg-white/10 transition-all disabled:opacity-50">
+                  {(!isOwner && locallyPaused) || !videoState.playing ? <Play size={22} fill="white" /> : <Pause size={22} fill="white" />}
                 </button>
                 <button onClick={() => seek(10)} disabled={!isOwner} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipForward size={18} /></button>
                 <div className="flex items-center gap-1 group/vol">

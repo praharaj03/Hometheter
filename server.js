@@ -1,7 +1,7 @@
 const MAX_USERNAME_LEN = 32;
 const MAX_MESSAGE_LEN = 500;
 const MAX_SRC_LEN = 4096;
-const MAX_USERS_PER_ROOM = 50;
+const MAX_USERS_PER_ROOM = 10;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const RATE_LIMIT_MAX = 30;
 const RECONNECT_GRACE_MS = 2 * 60 * 1000;
@@ -112,7 +112,6 @@ async function main() {
 
   const deleteRoom = (roomId, room) => {
     if (rooms.get(roomId) !== room) return;
-    if (room.ownerDisconnectTimer) clearTimeout(room.ownerDisconnectTimer);
     for (const user of room.users) {
       if (user.expiryTimer) clearTimeout(user.expiryTimer);
     }
@@ -154,7 +153,6 @@ async function main() {
           ownerToken,
           ownerParticipantToken: participantToken,
           ownerSocketId: null,
-          ownerDisconnectTimer: null,
           users: [],
           videoState: { playing: false, currentTime: 0, src: "", speed: 1 },
           mediaPath: null,
@@ -175,9 +173,9 @@ async function main() {
       if (currentRoomId && currentRoomId !== roomId) socket.leave(currentRoomId);
 
       let user = room.users.find((member) => member.participantToken === participantToken);
-      const onlineCount = room.users.filter((member) => member.connected && member.id !== socket.id).length;
-      if (!user && onlineCount >= MAX_USERS_PER_ROOM) {
-        socket.emit("room-error", { message: "Room is full (maximum 50 participants)." });
+      const onlineCount = room.users.filter((member) => member.connected && member !== user).length;
+      if (onlineCount >= MAX_USERS_PER_ROOM) {
+        socket.emit("room-error", { message: "Room is full (maximum 10 participants, including the owner)." });
         return;
       }
 
@@ -202,8 +200,6 @@ async function main() {
       }
       if (isOwner) {
         room.ownerSocketId = socket.id;
-        if (room.ownerDisconnectTimer) clearTimeout(room.ownerDisconnectTimer);
-        room.ownerDisconnectTimer = null;
       }
       currentRoomId = roomId;
       socket.join(roomId);
@@ -247,6 +243,13 @@ async function main() {
       if (!Object.keys(updated).length) return;
       room.videoState = { ...room.videoState, ...updated };
       io.to(currentRoomId).emit("video-state", updated);
+    });
+
+    socket.on("request-playback-sync", () => {
+      const room = rooms.get(currentRoomId);
+      const user = findConnectedUser(room, socket.id);
+      if (!room || !user || user.isOwner || user.isBlocked) return;
+      socket.emit("playback-sync", room.videoState);
     });
 
     socket.on("chat-message", (payload = {}) => {
@@ -324,11 +327,12 @@ async function main() {
       const room = rooms.get(roomId);
       const user = findConnectedUser(room, socket.id);
       if (!room || !user) return;
-      user.connected = false;
       if (user.isOwner) {
-        room.ownerSocketId = null;
-        room.ownerDisconnectTimer = setTimeout(() => deleteRoom(roomId, room), RECONNECT_GRACE_MS);
-      } else if (!user.isBlocked) {
+        deleteRoom(roomId, room);
+        return;
+      }
+      user.connected = false;
+      if (!user.isBlocked) {
         user.expiryTimer = setTimeout(() => removeUser(roomId, room, user), RECONNECT_GRACE_MS);
       }
       io.to(roomId).emit("users-update", publicUsers(room));
