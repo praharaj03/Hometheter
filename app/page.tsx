@@ -97,7 +97,7 @@ function HomeContent() {
 
             <div className="mt-9 grid max-w-lg grid-cols-3 gap-2.5">
               {[
-                { icon: Users, label: "Up to 10 friends" },
+                { icon: Users, label: "Up to 50 friends" },
                 { icon: Play, label: "Synced playback" },
                 { icon: LockKeyhole, label: "Private rooms" },
               ].map(({ icon: Icon, label }) => (
@@ -191,7 +191,7 @@ function HomeContent() {
                 Share one simple code
               </div>
             </div>
-            <p className="mt-4 text-center text-[10px] leading-5 text-zinc-600">Rooms support up to 10 people. The host controls what plays.</p>
+            <p className="mt-4 text-center text-[10px] leading-5 text-zinc-600">Rooms support up to 50 people. The host controls what plays.</p>
           </section>
         </div>
 

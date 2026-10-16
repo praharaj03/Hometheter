@@ -17,7 +17,7 @@ interface RoomState {
   you: { uid: string; isOwner: boolean; isBlocked: boolean };
 }
 
-const ROOM_CAPACITY = 10;
+const ROOM_CAPACITY = 50;
 
 export default function RoomContent() {
   const { id: roomId } = useParams<{ id: string }>();

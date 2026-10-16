@@ -1,7 +1,7 @@
 const MAX_USERNAME_LEN = 32;
 const MAX_MESSAGE_LEN = 500;
 const MAX_SRC_LEN = 4096;
-const MAX_USERS_PER_ROOM = 10;
+const MAX_USERS_PER_ROOM = 50;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const RATE_LIMIT_MAX = 30;
 const RECONNECT_GRACE_MS = 2 * 60 * 1000;
@@ -175,7 +175,7 @@ async function main() {
       let user = room.users.find((member) => member.participantToken === participantToken);
       const onlineCount = room.users.filter((member) => member.connected && member !== user).length;
       if (onlineCount >= MAX_USERS_PER_ROOM) {
-        socket.emit("room-error", { message: "Room is full (maximum 10 participants, including the owner)." });
+        socket.emit("room-error", { message: "Room is full (maximum 50 participants, including the owner)." });
         return;
       }
 

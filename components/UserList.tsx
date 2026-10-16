@@ -9,7 +9,7 @@ interface Props {
   socket: Socket;
 }
 
-const ROOM_CAPACITY = 10;
+const ROOM_CAPACITY = 50;
 
 function getPingColor(ping: number) {
   if (ping < 80) return "text-green-400";

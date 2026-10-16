@@ -1,7 +1,7 @@
 # HomeTheater
 
 Watch the same media together in a room. The room owner controls playback, participants can chat, and the owner can temporarily block or unblock a participant's chat and controls.
-Rooms support up to 10 connected people, including the owner. The owner sees how many people are present and how many places remain.
+Rooms support up to 50 connected people, including the owner. The owner sees how many people are present and how many places remain.
 
 ## Run locally
 
