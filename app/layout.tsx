@@ -8,9 +8,22 @@ export const bebasNeue = Bebas_Neue({ subsets: ["latin"], weight: "400", variabl
 export const metadata: Metadata = {
   title: "HomeTheater",
   description: "Watch together, feel together.",
+  keywords: ["HomeTheater", "watch party", "shared viewing", "video streaming"],
   icons: {
     icon: "/logo.svg",
   },
+  openGraph: {
+    title: "HomeTheater",
+    description: "Watch movies and videos together with a shared viewing experience.",
+    siteName: "HomeTheater",
+    type: "website",
+  },
+  twitter: {
+    card: "summary",
+    title: "HomeTheater",
+    description: "Watch movies and videos together with a shared viewing experience.",
+  },
+  robots: { index: true, follow: true },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
