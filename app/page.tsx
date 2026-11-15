@@ -1,10 +1,12 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRight, Check, Clapperboard, Copy, Link2, LockKeyhole, MessageCircle, Play, Radio, ShieldCheck, Upload, Users, X } from "lucide-react";
 import { useRoomStore } from "@/lib/store";
+import { saveName, useSavedName } from "@/lib/session";
+import { useDialogFocus } from "@/lib/useDialogFocus";
 
 function generateRoomId(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -24,11 +26,16 @@ function HomeContent() {
   const router = useRouter();
   const { setUsername, setRoomId } = useRoomStore();
   const searchParams = useSearchParams();
-  const [name, setName] = useState("");
-  const [joinCode, setJoinCode] = useState("");
-  const [tab, setTab] = useState<"create" | "join">(() => searchParams.get("tab") === "join" ? "join" : "create");
+  const savedName = useSavedName();
+  const [nameInput, setName] = useState<string | null>(null);
+  const name = nameInput ?? savedName;
+  const [joinCode, setJoinCode] = useState(() => searchParams.get("room") || "");
+  const [tab, setTab] = useState<"create" | "join">(() => searchParams.get("tab") === "join" || searchParams.has("room") ? "join" : "create");
   const [error, setError] = useState("");
   const [showGuide, setShowGuide] = useState(false);
+  const guideRef = useRef<HTMLElement>(null);
+  const closeGuide = useCallback(() => setShowGuide(false), []);
+  useDialogFocus(guideRef, showGuide, closeGuide);
 
   const enterRoom = (action: "create" | "join") => {
     if (!name.trim()) {
@@ -44,13 +51,14 @@ function HomeContent() {
 
     try {
       if (action === "create") sessionStorage.setItem(`hometheater:${id}:owner`, crypto.randomUUID());
-      sessionStorage.setItem(`hometheater:${id}:participant`, crypto.randomUUID());
+      if (!sessionStorage.getItem(`hometheater:${id}:participant`)) sessionStorage.setItem(`hometheater:${id}:participant`, crypto.randomUUID());
     } catch {
       setError("Your browser could not save this room session. Enable session storage and try again.");
       return;
     }
 
     setUsername(name.trim());
+    saveName(name.trim());
     setRoomId(id);
     router.push(`/room/${id}`);
   };
@@ -120,7 +128,7 @@ function HomeContent() {
               Create a room
               <span className="h-px w-7 bg-white/10" />
               <span className="flex h-6 w-6 items-center justify-center rounded-full border border-white/10 text-[10px] text-zinc-300">2</span>
-              Share the code
+              Share an invite
               <span className="h-px w-7 bg-white/10" />
               <span className="flex h-6 w-6 items-center justify-center rounded-full border border-white/10 text-[10px] text-zinc-300">3</span>
               Watch together
@@ -195,7 +203,7 @@ function HomeContent() {
                 Free to use
                 <span className="text-zinc-800">·</span>
                 <Link2 size={12} />
-                Share one simple code
+                Share one simple link
               </div>
             </div>
             <p className="mt-4 text-center text-[10px] leading-5 text-zinc-600">Rooms support up to 50 people. The host controls what plays.</p>
@@ -218,6 +226,8 @@ function HomeContent() {
           }}
         >
           <section
+            ref={guideRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="guide-title"
@@ -247,8 +257,8 @@ function HomeContent() {
                 },
                 {
                   icon: Copy,
-                  title: "Invite friends with the room code",
-                  detail: "The host copies the code from the room header and sends it to friends. Rooms allow up to 50 people, including the host.",
+                  title: "Invite friends with one link",
+                  detail: "Copy the invite from the room header. Friends open it, enter their name, and join. You can also share the 16-character room code. Rooms allow up to 50 people, including the host.",
                   color: "text-violet-300",
                   tint: "bg-violet-400/[0.08]",
                 },
@@ -262,14 +272,14 @@ function HomeContent() {
                 {
                   icon: Play,
                   title: "Watch in sync",
-                  detail: "The host controls shared play, pause, seeking, and speed. Participants can pause only their own playback; resuming syncs them to the host's latest position.",
+                  detail: "Mark yourself ready when you can watch. The host controls shared play, pause, seeking, and speed. Participants can pause only their own playback; resuming syncs them to the host's latest position. The host can queue links and share VTT or SRT subtitles for uploaded or direct media.",
                   color: "text-emerald-300",
                   tint: "bg-emerald-400/[0.08]",
                 },
                 {
                   icon: MessageCircle,
                   title: "Chat and manage the room",
-                  detail: "Everyone can chat. The host can temporarily block or unblock a participant's chat and playback controls. When the host leaves, the room closes for everyone.",
+                  detail: "Everyone can chat. The host can temporarily restrict a participant's chat and controls. If the host loses connection, playback pauses for up to 60 seconds while they reconnect. End room closes it immediately.",
                   color: "text-amber-300",
                   tint: "bg-amber-400/[0.08]",
                 },

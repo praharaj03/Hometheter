@@ -1,17 +1,20 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Socket } from "socket.io-client";
 import { useRoomStore, VideoState } from "@/lib/store";
 import { getSocketServerUrl } from "@/lib/socket";
+import { useMediaUpload } from "@/lib/useMediaUpload";
+import { toWebVtt } from "@/lib/subtitles";
 import {
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX,
-  Maximize, Upload, Link as LinkIcon, Gauge, X
+  Maximize, Upload, Link as LinkIcon, Gauge, X, Captions
 } from "lucide-react";
 
 interface Props {
   socket: Socket;
   isOwner: boolean;
   isBlocked: boolean;
+  connected: boolean;
   roomId: string;
   onLiveState: (provider: (() => object) | null) => void;
 }
@@ -40,6 +43,7 @@ interface YouTubePlayer {
   pauseVideo(): void;
   playVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
+  setPlaybackRate(rate: number): void;
   destroy(): void;
 }
 
@@ -76,14 +80,20 @@ function isSafeUrl(url: string): boolean {
   }
 }
 
-export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLiveState }: Props) {
+export default function VideoPlayer({ socket, isOwner, isBlocked, connected, roomId, onLiveState }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const ytPlayerRef = useRef<YouTubePlayer | null>(null);
+  const ytReadyRef = useRef(false);
   const ytContainerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSyncing = useRef(false);
-  const { videoState } = useRoomStore();
+  const { videoState, subtitle } = useRoomStore();
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  const subtitleInputRef = useRef<HTMLInputElement>(null);
+  const { upload, cancel: cancelUpload, progress: uploadProgress } = useMediaUpload(roomId);
+  const [finishingUpload, setFinishingUpload] = useState(false);
+  const uploading = Boolean(uploadProgress) || finishingUpload;
   const videoStateRef = useRef(useRoomStore.getState().videoState);
   const locallyPausedRef = useRef(false);
   const awaitingPlaybackSync = useRef(false);
@@ -98,7 +108,9 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [videoError, setVideoError] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState("");
+  const [subtitleError, setSubtitleError] = useState("");
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [locallyPaused, setLocallyPaused] = useState(false);
   const [isMediaLoading, setIsMediaLoading] = useState(false);
@@ -121,6 +133,29 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   }, [videoState.src]);
 
   useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !subtitle || isYouTube) return;
+    const url = URL.createObjectURL(new Blob([subtitle.text], { type: "text/vtt" }));
+    const track = document.createElement("track");
+    track.kind = "subtitles";
+    track.label = subtitle.label;
+    track.srclang = "und";
+    track.src = url;
+    track.default = captionsEnabled;
+    const show = () => { track.track.mode = captionsEnabled ? "showing" : "hidden"; };
+    track.addEventListener("load", show);
+    video.appendChild(track);
+    show();
+    return () => { track.removeEventListener("load", show); track.remove(); URL.revokeObjectURL(url); };
+  }, [subtitle, captionsEnabled, isYouTube, videoState.src]);
+
+  useEffect(() => {
+    if (!connected) cancelUpload();
+  }, [connected, cancelUpload]);
+
+  useEffect(() => () => { if (controlsTimer.current) clearTimeout(controlsTimer.current); }, []);
+
+  useEffect(() => {
     const receivePlaybackSync = (state: VideoState) => {
       if (isOwner) return;
       awaitingPlaybackSync.current = false;
@@ -135,12 +170,12 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   }, [isOwner, socket]);
 
   const emit = useCallback((state: Partial<VideoState>) => {
-    socket.emit("video-state", state);
+    if (socket.connected) socket.emit("video-state", state);
   }, [socket]);
 
   const provideLiveState = useCallback(() => ({
     ...videoStateRef.current,
-    currentTime: ytPlayerRef.current?.getCurrentTime?.() ?? videoRef.current?.currentTime ?? videoStateRef.current.currentTime,
+    currentTime: (ytReadyRef.current ? ytPlayerRef.current?.getCurrentTime() : undefined) ?? videoRef.current?.currentTime ?? videoStateRef.current.currentTime,
   }), []);
 
   useEffect(() => {
@@ -161,46 +196,60 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   }, [isYouTube]);
 
   useEffect(() => {
+    let disposed = false;
     if (!ytId) {
       ytPlayerRef.current?.destroy();
       ytPlayerRef.current = null;
+      ytReadyRef.current = false;
       return;
     }
     const init = () => {
       const container = ytContainerRef.current;
       const YT = window.YT;
-      if (!container || !YT) return;
+      if (disposed || !container || !YT) return;
       if (ytPlayerRef.current) {
         ytPlayerRef.current.loadVideoById(ytId);
         return;
       }
-      ytPlayerRef.current = new YT.Player(container, {
+      const mount = document.createElement("div");
+      container.replaceChildren(mount);
+      ytPlayerRef.current = new YT.Player(mount, {
         videoId: ytId,
         width: "100%",
         height: "100%",
-        playerVars: { autoplay: 0, controls: isOwner ? 1 : 0, rel: 0, modestbranding: 1 },
+        playerVars: { autoplay: 0, controls: isOwner ? 1 : 0, rel: 0, playsinline: 1, origin: window.location.origin },
         events: {
           onReady: (event: YouTubeEvent) => {
+            if (disposed) return;
+            ytReadyRef.current = true;
             setPlaybackBlocked(false);
             setIsMediaLoading(false);
             setDuration(event.target.getDuration());
             const state = videoStateRef.current;
             if (state.currentTime > 0) event.target.seekTo(state.currentTime, true);
+            event.target.setPlaybackRate(state.speed);
             if (state.playing) event.target.playVideo();
           },
           onAutoplayBlocked: () => {
+            if (disposed) return;
             setPlaybackBlocked(true);
             setVideoError("Your browser needs a user gesture before it can play media.");
           },
+          onPlaybackRateChange: (event: YouTubeEvent) => {
+            if (!disposed && isOwner && SPEEDS.includes(event.data)) emit({ speed: event.data });
+          },
           onStateChange: (event: YouTubeEvent) => {
+            if (disposed) return;
             if (event.data === 3) setIsMediaLoading(true);
             else if (event.data === 1 || event.data === 2 || event.data === 5) setIsMediaLoading(false);
             if (!isOwner || !window.YT) return;
             const state = window.YT.PlayerState;
             if (event.data === state.PLAYING) emit({ playing: true, currentTime: event.target.getCurrentTime() });
             if (event.data === state.PAUSED) emit({ playing: false, currentTime: event.target.getCurrentTime() });
+            if (event.data === 0) { emit({ playing: false, currentTime: event.target.getCurrentTime() }); socket.emit("queue-next"); }
           },
           onError: () => {
+            if (disposed) return;
             setIsMediaLoading(false);
             setVideoError("This YouTube video cannot be embedded or played.");
           },
@@ -209,16 +258,24 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
     };
     if (window.YT?.Player) init();
     else window.onYouTubeIframeAPIReady = init;
-  }, [emit, isOwner, ytId]);
+    return () => {
+      disposed = true;
+      ytReadyRef.current = false;
+      ytPlayerRef.current?.destroy();
+      ytPlayerRef.current = null;
+      if (window.onYouTubeIframeAPIReady === init) window.onYouTubeIframeAPIReady = undefined;
+    };
+  }, [emit, isOwner, ytId, socket]);
 
   useEffect(() => {
     const player = ytPlayerRef.current;
-    if (!player || !isYouTube || !window.YT) return;
+    if (!player || !ytReadyRef.current || !isYouTube || !window.YT) return;
     if (!isOwner && (locallyPausedRef.current || awaitingPlaybackSync.current)) return;
     const state = videoStateRef.current;
     if (Math.abs(player.getCurrentTime() - state.currentTime) > 1.5) player.seekTo(state.currentTime, true);
     if (state.playing && player.getPlayerState() !== window.YT.PlayerState.PLAYING) player.playVideo();
     if (!state.playing && player.getPlayerState() === window.YT.PlayerState.PLAYING) player.pauseVideo();
+    player.setPlaybackRate(state.speed);
   }, [isOwner, isYouTube, videoState]);
 
   useEffect(() => {
@@ -244,7 +301,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   useEffect(() => {
     const timer = window.setInterval(() => {
       const player = ytPlayerRef.current;
-      if (player) {
+      if (player && ytReadyRef.current) {
         setCurrentTime(player.getCurrentTime());
         setDuration(player.getDuration());
       }
@@ -256,7 +313,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
     if (!isOwner || !videoState.playing) return;
     const timer = window.setInterval(() => {
       const player = ytPlayerRef.current;
-      const time = player?.getCurrentTime() ?? videoRef.current?.currentTime;
+      const time = (ytReadyRef.current ? player?.getCurrentTime() : undefined) ?? videoRef.current?.currentTime;
       if (typeof time === "number" && Number.isFinite(time)) emit({ currentTime: time });
     }, 1000);
     return () => window.clearInterval(timer);
@@ -266,7 +323,8 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
     const input = event.currentTarget;
     const file = input.files?.[0];
     input.value = "";
-    if (!file) return;
+    if (!file || !connected || !isOwner) return;
+    if (file.size === 0) { setVideoError("This file is empty. Choose another media file."); return; }
     const extension = file.name.split(".").pop()?.toLowerCase() || "";
     const fallbackTypes: Record<string, string> = {
       mp4: "video/mp4", m4v: "video/mp4", webm: "video/webm", ogv: "video/ogg",
@@ -285,36 +343,53 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
       setVideoError("The maximum upload size is 2 GB.");
       return;
     }
-    const ownerToken = sessionStorage.getItem(`hometheater:${roomId}:owner`);
+    let ownerToken: string | null = null;
+    try { ownerToken = sessionStorage.getItem(`hometheater:${roomId}:owner`); } catch { /* Show the credentials error below. */ }
     if (!ownerToken) {
       setVideoError("Room owner credentials are missing. Recreate the room to upload media.");
       return;
     }
 
-    setUploading(true);
+    setUploadNotice("");
     setVideoError("");
     try {
       const baseUrl = getSocketServerUrl().replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/media/${encodeURIComponent(roomId)}`, {
-        method: "POST",
-        headers: { "Content-Type": contentType, "X-Room-Token": ownerToken },
-        body: file,
+      const { mediaId } = await upload(file, contentType, ownerToken);
+      if (!socket.connected) throw new Error("Connection lost. Reconnect and upload the file again.");
+      setFinishingUpload(true);
+      await new Promise<void>((resolve, reject) => {
+        socket.timeout(8000).emit("activate-media", { mediaId, src: `${baseUrl}/media/${encodeURIComponent(roomId)}?v=${encodeURIComponent(mediaId)}` }, (timeout: Error | null, result?: { error?: string }) => {
+          if (timeout || result?.error) reject(new Error(result?.error || "Could not load the upload. Check your connection and try again."));
+          else resolve();
+        });
       });
-      if (!response.ok) {
-        const result = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(result.error || `Upload failed (${response.status}).`);
-      }
-      emit({ src: `${baseUrl}/media/${encodeURIComponent(roomId)}`, playing: false, currentTime: 0, speed: 1 });
+      setUploadNotice("Upload complete.");
     } catch (error) {
-      setVideoError(error instanceof Error ? error.message : "The video upload failed.");
+      if (error instanceof DOMException && error.name === "AbortError") setUploadNotice("Upload cancelled. You can choose another file.");
+      else setVideoError(error instanceof Error ? error.message : "The video upload failed.");
     } finally {
-      setUploading(false);
+      setFinishingUpload(false);
     }
+  };
+
+  const handleSubtitleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file || !isOwner || !connected) return;
+    setSubtitleError("");
+    try {
+      if (!/\.(vtt|srt)$/i.test(file.name) || file.size > 65_536) throw new Error("Choose a VTT or SRT subtitle file up to 64 KB.");
+      const text = toWebVtt(await file.text());
+      socket.timeout(8000).emit("set-subtitle", { text, label: file.name }, (timeout: Error | null, result?: { error?: string }) => {
+        if (timeout || result?.error) setSubtitleError(result?.error || "Subtitles could not be shared. Please retry.");
+      });
+    } catch (error) { setSubtitleError(error instanceof Error ? error.message : "Could not load subtitles."); }
   };
 
   const allowPlayback = () => {
     if (isBlocked) return;
     if (ytPlayerRef.current) {
+      if (!ytReadyRef.current) return;
       ytPlayerRef.current.playVideo();
       setPlaybackBlocked(false);
       setVideoError("");
@@ -344,6 +419,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   };
 
   const handleUrlLoad = () => {
+    if (!connected || uploading) return;
     const url = urlInput.trim();
     if (!url) return;
     if (!isSafeUrl(url)) {
@@ -359,6 +435,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   };
 
   const togglePlay = () => {
+    if (!connected || (isYouTube && !ytReadyRef.current)) return;
     if (!isOwner) {
       if (isBlocked) return;
       const isPlaying = isYouTube && ytPlayerRef.current && window.YT
@@ -392,7 +469,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   };
 
   const seek = (delta: number) => {
-    if (!isOwner) return;
+    if (!isOwner || !connected || (isYouTube && !ytReadyRef.current)) return;
     const player = ytPlayerRef.current;
     const video = videoRef.current;
     const time = player?.getCurrentTime() ?? video?.currentTime;
@@ -409,7 +486,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   };
 
   const handleSeekBar = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (!isOwner) return;
+    if (!isOwner || !connected) return;
     const time = Number.parseFloat(event.target.value);
     const player = ytPlayerRef.current;
     if (player) player.seekTo(time, true);
@@ -418,15 +495,29 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   };
 
   const setSpeed = (speed: number) => {
-    if (!isOwner) return;
+    if (!isOwner || !connected) return;
     if (videoRef.current) videoRef.current.playbackRate = speed;
     emit({ speed });
     setShowSpeedMenu(false);
   };
 
   const toggleFullscreen = () => {
-    if (!document.fullscreenElement) containerRef.current?.requestFullscreen();
-    else document.exitFullscreen();
+    const action = !document.fullscreenElement ? containerRef.current?.requestFullscreen?.() : document.exitFullscreen?.();
+    action?.catch(() => setVideoError("Fullscreen is unavailable. Try your browser's fullscreen option."));
+  };
+
+  const handlePlayerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, select, button, a, [contenteditable=true]") || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!hasSrc) return;
+    switch (event.key.toLowerCase()) {
+      case " ": case "k": event.preventDefault(); togglePlay(); break;
+      case "arrowleft": event.preventDefault(); seek(-10); break;
+      case "arrowright": event.preventDefault(); seek(10); break;
+      case "f": event.preventDefault(); toggleFullscreen(); break;
+      case "m": event.preventDefault(); if (videoRef.current) { videoRef.current.muted = !muted; setMuted(!muted); } break;
+      case "c": if (subtitle && !isYouTube) { event.preventDefault(); setCaptionsEnabled((enabled) => !enabled); } break;
+    }
   };
 
   const showControlsTemporarily = () => {
@@ -438,23 +529,38 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div ref={containerRef} className="flex-1 flex flex-col items-center justify-center bg-black relative overflow-hidden group">
+    <div ref={containerRef} tabIndex={0} role="region" aria-label="Video player. Space or K: play or pause. Arrow keys: seek. M: mute. F: fullscreen. C: subtitles." onKeyDown={handlePlayerKeyDown} onFocusCapture={() => { setShowControls(true); if (controlsTimer.current) clearTimeout(controlsTimer.current); }} className="min-h-0 flex-1 flex flex-col items-center justify-center bg-black relative overflow-hidden group">
       {isOwner && (
-      <div className="absolute left-3 right-3 top-3 z-20 flex flex-wrap gap-2">
-        <label className={`flex cursor-pointer items-center gap-2 rounded-xl border border-white/[0.08] bg-[#111114]/90 px-3.5 py-2.5 text-[11px] font-medium text-zinc-200 shadow-lg shadow-black/20 backdrop-blur-xl transition-colors hover:border-white/20 hover:bg-[#1b1b20] ${uploading ? "cursor-wait opacity-60" : ""}`}>
+      <div className="z-20 flex w-full shrink-0 flex-wrap gap-2 bg-[#0e0e11] p-3">
+        <button type="button" disabled={uploading || !connected} onClick={() => mediaInputRef.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#111114]/90 px-3.5 py-2.5 text-[11px] font-medium text-zinc-200 transition-colors hover:bg-[#1b1b20] disabled:opacity-50">
             <Upload size={13} />
           <span>{uploading ? "Uploading…" : "Upload media"}</span>
-            <input type="file" accept="video/*,audio/*" className="hidden" onChange={handleFileUpload} disabled={uploading} />
-          </label>
+          </button>
+          <input ref={mediaInputRef} aria-label="Upload media file" type="file" accept="video/*,audio/*" className="hidden" onChange={handleFileUpload} disabled={uploading || !connected} />
           <button
             onClick={() => { setShowUrlInput((open) => !open); setVideoError(""); }}
+            disabled={!connected || uploading}
+            aria-expanded={showUrlInput}
           className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#111114]/90 px-3.5 py-2.5 text-[11px] font-medium text-zinc-200 shadow-lg shadow-black/20 backdrop-blur-xl transition-colors hover:border-white/20 hover:bg-[#1b1b20]"
           >
           <LinkIcon size={13} /> Add link
           </button>
+          {hasSrc && !isYouTube && <>
+            <button disabled={!connected} onClick={() => subtitleInputRef.current?.click()} className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-[11px] text-zinc-200"><Captions size={14} /> Add subtitles</button>
+            <input ref={subtitleInputRef} type="file" accept=".vtt,.srt" aria-label="Upload subtitle file" className="hidden" onChange={handleSubtitleUpload} />
+            {subtitle && <button disabled={!connected} onClick={() => socket.emit("set-subtitle", null)} className="rounded-xl px-3 py-2 text-[11px] text-zinc-300">Remove subtitles</button>}
+          </>}
+          {uploadProgress && <div className="w-full rounded-xl border border-white/10 bg-black/50 p-3">
+            <div className="mb-2 flex items-center gap-3 text-xs"><span className="min-w-0 flex-1 truncate">{uploadProgress.name}</span><button onClick={cancelUpload} className="rounded-lg border border-white/20 px-3 py-2">Cancel upload</button></div>
+            <progress aria-label="Media upload progress" value={uploadProgress.loaded} max={uploadProgress.total || 1} className="h-2 w-full accent-red-400" />
+            <p role="status" className="mt-2 text-[11px] text-zinc-300">{Math.floor(uploadProgress.loaded / (uploadProgress.total || 1) * 100)}% · {(uploadProgress.loaded / 1024 / 1024).toFixed(1)} / {(uploadProgress.total / 1024 / 1024).toFixed(1)} MB{uploadProgress.loaded === uploadProgress.total ? " · Finishing upload…" : ""}</p>
+          </div>}
+          {uploadNotice && <p role="status" className="w-full text-xs text-zinc-300">{uploadNotice}</p>}
+          {subtitleError && <p role="alert" className="w-full text-xs text-red-300">{subtitleError}</p>}
           {showUrlInput && (
             <div className="flex gap-2 w-full mt-1">
               <input
+                aria-label="YouTube or direct media URL"
                 autoFocus
                 className="min-w-0 flex-1 rounded-xl border border-white/[0.08] bg-[#111114]/95 px-4 py-2.5 text-xs text-white outline-none backdrop-blur focus:border-red-400/40"
                 placeholder="Paste YouTube or direct video URL..."
@@ -463,14 +569,14 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
                 onChange={(event) => setUrlInput(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && handleUrlLoad()}
               />
-              <button onClick={handleUrlLoad} className="shrink-0 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black transition-colors hover:bg-zinc-200">Load</button>
+              <button disabled={!connected || uploading} onClick={handleUrlLoad} className="shrink-0 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black transition-colors hover:bg-zinc-200">Load</button>
               <button onClick={() => { setShowUrlInput(false); setVideoError(""); }} aria-label="Close URL input" className="rounded-xl border border-white/[0.08] bg-black/40 p-2.5 text-zinc-400 transition-colors hover:text-white"><X size={14} /></button>
             </div>
           )}
           {videoError && (
             <div role="alert" className="flex w-full items-center gap-2 rounded-xl border border-red-400/20 bg-red-950/90 px-3 py-2.5 text-xs text-red-200 shadow-xl backdrop-blur-xl">
               <span>⚠️ {videoError}</span>
-              <button onClick={() => setVideoError("")} className="ml-auto text-red-600 hover:text-red-400"><X size={12} /></button>
+              <button aria-label="Dismiss playback error" onClick={() => setVideoError("")} className="ml-auto p-2 text-red-300 hover:text-red-100"><X size={14} /></button>
             </div>
           )}
         </div>
@@ -516,6 +622,8 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
               ref={videoRef}
               className="absolute inset-0 w-full h-full object-contain"
               src={isSafeUrl(videoState.src) ? videoState.src : undefined}
+              playsInline
+              onEnded={() => { if (isOwner) { emit({ playing: false, currentTime: videoRef.current?.currentTime ?? 0 }); socket.emit("queue-next"); } }}
               onLoadStart={() => setIsMediaLoading(true)}
               onWaiting={() => setIsMediaLoading(true)}
               onStalled={() => setIsMediaLoading(true)}
@@ -549,7 +657,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
                 if (mediaError.code === MediaError.MEDIA_ERR_DECODE || mediaError.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
                   setVideoError("This video codec or container is not supported by your browser. Try MP4 with H.264/AAC or WebM.");
                 } else {
-                  setVideoError("The video could not be downloaded. Check the Render upload, connection, and CORS origin settings.");
+                  setVideoError("The video could not be loaded. Check the link or ask the host to upload it again.");
                 }
               }}
               onPlay={() => { if (isOwner && !isSyncing.current) emit({ playing: true, currentTime: videoRef.current?.currentTime ?? 0 }); }}
@@ -579,33 +687,33 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
 
       {hasSrc && !isYouTube && (
         <div
-          className={`absolute bottom-0 left-0 right-0 transition-opacity duration-300 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+          className={`relative z-10 w-full shrink-0 transition-opacity duration-300 focus-within:opacity-100 focus-within:pointer-events-auto ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"}`}
           onMouseEnter={() => { setShowControls(true); if (controlsTimer.current) clearTimeout(controlsTimer.current); }}
         >
           <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/95 via-black/55 to-transparent" />
           <div className="relative px-4 pb-4 pt-10">
-            <div className="relative mb-3 group/seek">
+            <div className="relative mb-3 rounded-full focus-within:ring-2 focus-within:ring-red-300 group/seek">
               <div className="h-1 bg-white/20 rounded-full overflow-hidden">
                 <div className="h-full bg-white rounded-full transition-all" style={{ width: `${progress}%` }} />
               </div>
-              <input type="range" min={0} max={duration || 100} step={0.1} value={currentTime} onChange={handleSeekBar} disabled={!isOwner} className="absolute inset-0 w-full opacity-0 cursor-pointer disabled:cursor-default h-full" />
+              <input aria-label="Playback position" aria-valuetext={`${formatTime(currentTime)} of ${formatTime(duration)}`} type="range" min={0} max={duration || 100} step={0.1} value={currentTime} onChange={handleSeekBar} disabled={!isOwner || !connected} className="absolute -inset-y-2 left-0 w-full opacity-0 cursor-pointer disabled:cursor-default h-5" />
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1 sm:gap-2">
-                <button onClick={() => seek(-10)} disabled={!isOwner} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipBack size={18} /></button>
-                <button onClick={togglePlay} disabled={!isOwner && (isBlocked || playbackBlocked)} className="p-2 rounded-lg text-white hover:bg-white/10 transition-all disabled:opacity-50">
+                <button aria-label="Seek backward 10 seconds" onClick={() => seek(-10)} disabled={!isOwner || !connected} className="p-2.5 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipBack size={18} /></button>
+                <button aria-label={(!isOwner && locallyPaused) || !videoState.playing ? "Play" : isOwner ? "Pause" : "Pause for me"} onClick={togglePlay} disabled={!connected || (!isOwner && (isBlocked || playbackBlocked))} className="p-2.5 rounded-lg text-white hover:bg-white/10 transition-all disabled:opacity-50">
                   {(!isOwner && locallyPaused) || !videoState.playing ? <Play size={22} fill="white" /> : <Pause size={22} fill="white" />}
                 </button>
-                <button onClick={() => seek(10)} disabled={!isOwner} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipForward size={18} /></button>
+                <button aria-label="Seek forward 10 seconds" onClick={() => seek(10)} disabled={!isOwner || !connected} className="p-2.5 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:cursor-default"><SkipForward size={18} /></button>
                 <div className="flex items-center gap-1 group/vol">
-                  <button onClick={() => {
+                  <button aria-label={muted || volume === 0 ? "Unmute" : "Mute"} onClick={() => {
                     const next = !muted;
                     setMuted(next);
                     if (videoRef.current) videoRef.current.muted = next;
                   }} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all">
                     {muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
                   </button>
-                  <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => {
+                  <input aria-label="Volume" type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => {
                     const value = Number.parseFloat(event.target.value);
                     setVolume(value);
                     setMuted(value === 0);
@@ -615,9 +723,10 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
                 <span className="text-xs text-zinc-400 font-mono ml-1 hidden sm:block">{formatTime(currentTime)} / {formatTime(duration)}</span>
               </div>
               <div className="flex items-center gap-1 relative">
+                {subtitle && <button aria-label={captionsEnabled ? "Hide subtitles" : "Show subtitles"} aria-pressed={captionsEnabled} onClick={() => setCaptionsEnabled((enabled) => !enabled)} className="rounded-lg p-2 text-zinc-200"><Captions size={18} /></button>}
                 {isOwner && (
                   <div className="relative">
-                    <button onClick={() => setShowSpeedMenu((open) => !open)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:text-white hover:bg-white/10 transition-all font-mono">
+                    <button disabled={!connected} aria-label={`Playback speed ${videoState.speed} times`} aria-expanded={showSpeedMenu} onClick={() => setShowSpeedMenu((open) => !open)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:text-white hover:bg-white/10 transition-all font-mono">
                       <Gauge size={14} /> {videoState.speed}x
                     </button>
                     {showSpeedMenu && (
@@ -629,7 +738,7 @@ export default function VideoPlayer({ socket, isOwner, isBlocked, roomId, onLive
                     )}
                   </div>
                 )}
-                <button onClick={toggleFullscreen} className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all"><Maximize size={18} /></button>
+                <button aria-label="Toggle fullscreen" onClick={toggleFullscreen} className="p-2.5 rounded-lg text-zinc-300 hover:text-white hover:bg-white/10 transition-all"><Maximize size={18} /></button>
               </div>
             </div>
           </div>

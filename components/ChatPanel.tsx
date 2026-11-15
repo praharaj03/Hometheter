@@ -8,10 +8,11 @@ import { sanitizeInput } from "@/lib/socket";
 
 interface Props {
   socket: Socket;
+  connected: boolean;
 }
 
-export default function ChatPanel({ socket }: Props) {
-  const { messages, username, isBlocked } = useRoomStore();
+export default function ChatPanel({ socket, connected }: Props) {
+  const { messages, myUid, isBlocked } = useRoomStore();
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -21,7 +22,7 @@ export default function ChatPanel({ socket }: Props) {
 
   const send = () => {
     const safe = sanitizeInput(input, 500);
-    if (!safe || isBlocked) return;
+    if (!safe || isBlocked || !connected) return;
     socket.emit("chat-message", { message: safe });
     setInput("");
   };
@@ -39,10 +40,10 @@ export default function ChatPanel({ socket }: Props) {
             <p className="mt-1 text-[11px] text-zinc-600">Send a message to get things started.</p>
           </div>
         )}
-        {messages.map((msg, i) => {
-          const isMe = msg.username === username;
+        {messages.map((msg) => {
+          const isMe = msg.senderUid === myUid;
           return (
-            <div key={i} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
+            <div key={msg.id} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
               <span className="mb-1 text-[10px] text-zinc-500">
                 {isMe ? "You" : msg.username} · {fmt(msg.time)}
               </span>
@@ -63,17 +64,18 @@ export default function ChatPanel({ socket }: Props) {
 
       <div className="flex gap-2 border-t border-white/[0.07] p-3">
         <input
+          aria-label="Chat message"
           className="min-w-0 flex-1 rounded-xl border border-white/[0.07] bg-white/[0.035] px-3.5 py-2.5 text-xs text-white outline-none transition-colors placeholder:text-zinc-600 focus:border-red-400/40 disabled:opacity-50"
-          placeholder={isBlocked ? "Chat is unavailable" : "Write a message..."}
+          placeholder={!connected ? "Reconnecting…" : isBlocked ? "Chat is unavailable" : "Write a message..."}
           value={input}
           maxLength={500}
-          disabled={isBlocked}
+          disabled={isBlocked || !connected}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
+          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()}
         />
         <button
           onClick={send}
-          disabled={isBlocked}
+          disabled={isBlocked || !connected || !input.trim()}
           aria-label="Send message"
           className="rounded-xl bg-red-500 p-2.5 text-white transition-all hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-40"
         >

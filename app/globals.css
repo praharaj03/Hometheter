@@ -21,6 +21,13 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+:is(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid #fca5a5;
+  outline-offset: 3px;
+}
+
+button, input[type="range"] { touch-action: manipulation; }
+
 ::selection {
   background: rgb(239 68 68 / 35%);
 }

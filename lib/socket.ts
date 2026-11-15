@@ -13,7 +13,7 @@ export const getSocket = (): Socket => {
 export const subscribeToSocket = (onStoreChange: () => void): (() => void) => {
   const currentSocket = getSocket();
   currentSocket.on("connect", onStoreChange);
-  if (currentSocket.connected) queueMicrotask(onStoreChange);
+  queueMicrotask(onStoreChange);
   return () => currentSocket.off("connect", onStoreChange);
 };
 

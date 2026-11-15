@@ -5,6 +5,7 @@ const MAX_USERS_PER_ROOM = 50;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const RATE_LIMIT_MAX = 30;
 const RECONNECT_GRACE_MS = 2 * 60 * 1000;
+const HOST_RECONNECT_GRACE_MS = Math.max(100, Number(process.env.HOST_RECONNECT_GRACE_MS) || 60_000);
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 function sanitizeString(value, maxLen) {
@@ -41,9 +42,9 @@ function createRateLimiter() {
 
 function publicUsers(room) {
   return room.users
-    .filter((user) => user.connected || user.isBlocked)
-    .map(({ id, username, uid, isOwner, isBlocked, connected }) => ({
-      id, username, uid, isOwner, isBlocked, isConnected: connected,
+    .filter((user) => user.connected || user.isBlocked || user.isOwner)
+    .map(({ id, username, uid, isOwner, isBlocked, connected, isReady }) => ({
+      id, username, uid, isOwner, isBlocked, isReady, isConnected: connected,
     }));
 }
 
@@ -53,10 +54,18 @@ function findConnectedUser(room, socketId) {
 
 function sendRoomState(socket, room, user) {
   socket.emit("room-state", {
-    videoState: room.videoState,
+    videoState: playbackSnapshot(room),
     users: publicUsers(room),
     you: { uid: user.uid, isOwner: user.isOwner, isBlocked: user.isBlocked },
+    hostReconnectUntil: room.hostReconnectUntil,
+    queue: room.queue,
+    subtitle: room.subtitle,
   });
+}
+
+function playbackSnapshot(room) {
+  const state = room.videoState;
+  return { ...state, currentTime: state.currentTime + (state.playing ? (Date.now() - room.updatedAt) / 1000 * state.speed : 0) };
 }
 
 async function main() {
@@ -84,7 +93,7 @@ async function main() {
   const httpServer = createServer(async (request, response) => {
     const pathname = new URL(request.url || "/", "http://localhost").pathname;
     if (pathname === "/healthz") {
-      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "ok" }));
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "ok", service: "hometheater" }));
       return;
     }
     if (pathname.startsWith("/socket.io/")) return;
@@ -121,6 +130,10 @@ async function main() {
     if (room.mediaPath) fs.promises.unlink(room.mediaPath).catch((error) => {
       console.error("Failed to remove room media:", error);
     });
+    if (room.pendingMedia) {
+      clearTimeout(room.pendingMedia.timer);
+      fs.promises.unlink(room.pendingMedia.path).catch(() => {});
+    }
   };
 
   const removeUser = (roomId, room, user) => {
@@ -132,12 +145,39 @@ async function main() {
     io.to(roomId).emit("users-update", publicUsers(room));
   };
 
+  const disconnectUser = (roomId, room, user) => {
+    user.connected = false;
+    user.isReady = false;
+    if (user.expiryTimer) clearTimeout(user.expiryTimer);
+    if (user.isOwner) {
+      room.ownerSocketId = null;
+      room.videoState = { ...playbackSnapshot(room), playing: false };
+      room.updatedAt = Date.now();
+      room.hostReconnectUntil = Date.now() + HOST_RECONNECT_GRACE_MS;
+      user.expiryTimer = setTimeout(() => deleteRoom(roomId, room), HOST_RECONNECT_GRACE_MS);
+      io.to(roomId).emit("video-state", room.videoState);
+      io.to(roomId).emit("room-presence", { hostReconnectUntil: room.hostReconnectUntil });
+    } else if (!user.isBlocked) {
+      user.expiryTimer = setTimeout(() => removeUser(roomId, room, user), RECONNECT_GRACE_MS);
+    }
+    io.to(roomId).emit("users-update", publicUsers(room));
+  };
+
+  const changeSource = (roomId, room, src) => {
+    room.videoState = { src, playing: false, currentTime: 0, speed: 1 };
+    room.updatedAt = Date.now();
+    room.subtitle = null;
+    for (const member of room.users) member.isReady = false;
+    io.to(roomId).emit("subtitle-update", null);
+    io.to(roomId).emit("users-update", publicUsers(room));
+  };
+
   io.on("connection", (socket) => {
     let currentRoomId = null;
     const guard = () => rateLimit(socket.id);
 
     socket.on("join-room", (payload = {}) => {
-      if (!payload || typeof payload !== "object") return;
+      if (!payload || typeof payload !== "object" || !guard()) return;
       const roomId = sanitizeString(payload.roomId, 64);
       const username = sanitizeString(payload.username, MAX_USERNAME_LEN) || "Guest";
       const participantToken = sanitizeString(payload.participantToken, 128);
@@ -155,6 +195,10 @@ async function main() {
           ownerSocketId: null,
           users: [],
           videoState: { playing: false, currentTime: 0, src: "", speed: 1 },
+          updatedAt: Date.now(),
+          hostReconnectUntil: null,
+          queue: [],
+          subtitle: null,
           mediaPath: null,
           mediaType: null,
         };
@@ -170,13 +214,19 @@ async function main() {
         socket.emit("room-error", { message: "This room already exists and cannot be claimed by this browser." });
         return;
       }
-      if (currentRoomId && currentRoomId !== roomId) socket.leave(currentRoomId);
-
       let user = room.users.find((member) => member.participantToken === participantToken);
       const onlineCount = room.users.filter((member) => member.connected && member !== user).length;
-      if (onlineCount >= MAX_USERS_PER_ROOM) {
+      const reservedHost = !isOwner && room.hostReconnectUntil ? 1 : 0;
+      if (onlineCount + reservedHost >= MAX_USERS_PER_ROOM) {
         socket.emit("room-error", { message: "Room is full (maximum 50 participants, including the owner)." });
         return;
+      }
+
+      if (currentRoomId && currentRoomId !== roomId) {
+        const previousRoom = rooms.get(currentRoomId);
+        const previousUser = findConnectedUser(previousRoom, socket.id);
+        if (previousUser) disconnectUser(currentRoomId, previousRoom, previousUser);
+        socket.leave(currentRoomId);
       }
 
       if (!user) {
@@ -188,11 +238,13 @@ async function main() {
           isOwner,
           isBlocked: false,
           connected: true,
+          isReady: false,
           expiryTimer: null,
         };
         room.users.push(user);
       } else {
         if (user.expiryTimer) clearTimeout(user.expiryTimer);
+        if (user.connected && user.id !== socket.id) io.sockets.sockets.get(user.id)?.leave(roomId);
         user.id = socket.id;
         user.username = username;
         user.connected = true;
@@ -200,6 +252,8 @@ async function main() {
       }
       if (isOwner) {
         room.ownerSocketId = socket.id;
+        room.hostReconnectUntil = null;
+        io.to(roomId).emit("room-presence", { hostReconnectUntil: null });
       }
       currentRoomId = roomId;
       socket.join(roomId);
@@ -226,6 +280,7 @@ async function main() {
         currentTime,
         speed: [0.5, 0.75, 1, 1.25, 1.5, 2].includes(incoming.speed) ? incoming.speed : room.videoState.speed,
       };
+      room.updatedAt = Date.now();
       const targetSocket = io.sockets.sockets.get(target.id);
       if (targetSocket) sendRoomState(targetSocket, room, target);
     });
@@ -241,15 +296,39 @@ async function main() {
       if ([0.5, 0.75, 1, 1.25, 1.5, 2].includes(state.speed)) updated.speed = state.speed;
       if (typeof state.src === "string" && state.src.length <= MAX_SRC_LEN && (!state.src || isValidMediaUrl(state.src))) updated.src = state.src;
       if (!Object.keys(updated).length) return;
-      room.videoState = { ...room.videoState, ...updated };
-      io.to(currentRoomId).emit("video-state", updated);
+      if (updated.src !== undefined && updated.src !== room.videoState.src) changeSource(currentRoomId, room, updated.src);
+      room.videoState = { ...playbackSnapshot(room), ...updated };
+      room.updatedAt = Date.now();
+      io.to(currentRoomId).emit("video-state", room.videoState);
+    });
+
+    socket.on("activate-media", (payload = {}, acknowledge) => {
+      const room = rooms.get(currentRoomId);
+      const user = findConnectedUser(room, socket.id);
+      const respond = (result) => { if (typeof acknowledge === "function") acknowledge(result); };
+      if (!user?.isOwner || !guard()) return respond({ error: "Only the host can load uploaded media." });
+      const pending = room.pendingMedia;
+      if (!pending || pending.id !== payload?.mediaId) return respond({ error: "This upload expired or was cancelled. Please upload again." });
+      let url;
+      try { url = new URL(payload.src); } catch { return respond({ error: "Invalid uploaded media URL." }); }
+      if (!isValidMediaUrl(payload.src) || url.pathname !== `/media/${currentRoomId}` || url.searchParams.get("v") !== pending.id) return respond({ error: "Invalid uploaded media URL." });
+      clearTimeout(pending.timer);
+      const previousPath = room.mediaPath;
+      room.mediaPath = pending.path;
+      room.mediaType = pending.type;
+      room.mediaId = pending.id;
+      room.pendingMedia = null;
+      changeSource(currentRoomId, room, payload.src);
+      io.to(currentRoomId).emit("video-state", room.videoState);
+      if (previousPath) fs.promises.unlink(previousPath).catch((error) => console.error("Failed to remove replaced media:", error));
+      respond({ ok: true });
     });
 
     socket.on("request-playback-sync", () => {
       const room = rooms.get(currentRoomId);
       const user = findConnectedUser(room, socket.id);
       if (!room || !user || user.isOwner || user.isBlocked) return;
-      socket.emit("playback-sync", room.videoState);
+      socket.emit("playback-sync", playbackSnapshot(room));
     });
 
     socket.on("chat-message", (payload = {}) => {
@@ -259,7 +338,57 @@ async function main() {
       if (!room || !user || user.isBlocked || !guard()) return;
       const message = sanitizeString(payload.message, MAX_MESSAGE_LEN);
       if (!message) return;
-      io.to(currentRoomId).emit("chat-message", { username: user.username, message, time: Date.now() });
+      io.to(currentRoomId).emit("chat-message", { id: crypto.randomUUID(), senderUid: user.uid, username: user.username, message, time: Date.now() });
+    });
+
+    socket.on("set-ready", (payload = {}) => {
+      const room = rooms.get(currentRoomId);
+      const user = findConnectedUser(room, socket.id);
+      if (!user || user.isBlocked || typeof payload?.ready !== "boolean" || !guard()) return;
+      user.isReady = payload.ready;
+      io.to(currentRoomId).emit("users-update", publicUsers(room));
+    });
+
+    socket.on("set-subtitle", (payload = {}, acknowledge) => {
+      const room = rooms.get(currentRoomId);
+      const user = findConnectedUser(room, socket.id);
+      const respond = (result) => { if (typeof acknowledge === "function") acknowledge(result); };
+      if (!user?.isOwner || !guard()) return respond({ error: "Only the host can change subtitles." });
+      if (payload === null) room.subtitle = null;
+      else if (typeof payload?.text === "string" && Buffer.byteLength(payload.text) <= 65_536 && /^WEBVTT(?:\s|$)/.test(payload.text)) {
+        room.subtitle = { text: payload.text, label: sanitizeString(payload.label, 64) || "Subtitles" };
+      } else return respond({ error: "Use a valid VTT or SRT subtitle file up to 64 KB." });
+      io.to(currentRoomId).emit("subtitle-update", room.subtitle);
+      respond({ ok: true });
+    });
+
+    socket.on("queue-add", (payload = {}, acknowledge) => {
+      const room = rooms.get(currentRoomId);
+      const user = findConnectedUser(room, socket.id);
+      const respond = (result) => { if (typeof acknowledge === "function") acknowledge(result); };
+      if (!user?.isOwner || !guard()) return respond({ error: "Only the host can edit the queue." });
+      if (room.queue.length >= 20) return respond({ error: "The queue holds up to 20 links." });
+      if (typeof payload?.src !== "string" || payload.src.length > MAX_SRC_LEN || !isValidMediaUrl(payload.src)) return respond({ error: "Enter a valid media URL." });
+      room.queue.push({ id: crypto.randomUUID(), src: payload.src, title: sanitizeString(payload.title, 80) || "Untitled media" });
+      io.to(currentRoomId).emit("queue-update", room.queue);
+      respond({ ok: true });
+    });
+
+    socket.on("queue-remove", (payload = {}) => {
+      const room = rooms.get(currentRoomId);
+      if (!findConnectedUser(room, socket.id)?.isOwner || !guard()) return;
+      room.queue = room.queue.filter((item) => item.id !== payload?.id);
+      io.to(currentRoomId).emit("queue-update", room.queue);
+    });
+
+    socket.on("queue-next", () => {
+      const room = rooms.get(currentRoomId);
+      if (!findConnectedUser(room, socket.id)?.isOwner || !guard()) return;
+      const next = room.queue.shift();
+      if (!next) return;
+      changeSource(currentRoomId, room, next.src);
+      io.to(currentRoomId).emit("video-state", room.videoState);
+      io.to(currentRoomId).emit("queue-update", room.queue);
     });
 
     socket.on("set-blocked", (payload = {}) => {
@@ -300,7 +429,7 @@ async function main() {
       socket.to(currentRoomId).emit("user-ping", { id: socket.id, ping: Math.min(60_000, Math.max(0, Math.round(payload.ping))) });
     });
 
-    socket.on("leave-room", () => {
+    socket.on("leave-room", (payload) => {
       const roomId = currentRoomId;
       const room = rooms.get(roomId);
       const user = findConnectedUser(room, socket.id);
@@ -308,7 +437,10 @@ async function main() {
         currentRoomId = null;
         return;
       }
-      if (user.isOwner) {
+      if (payload?.temporary === true) {
+        disconnectUser(roomId, room, user);
+        socket.leave(roomId);
+      } else if (user.isOwner) {
         deleteRoom(roomId, room);
       } else if (user.isBlocked) {
         user.connected = false;
@@ -327,15 +459,7 @@ async function main() {
       const room = rooms.get(roomId);
       const user = findConnectedUser(room, socket.id);
       if (!room || !user) return;
-      if (user.isOwner) {
-        deleteRoom(roomId, room);
-        return;
-      }
-      user.connected = false;
-      if (!user.isBlocked) {
-        user.expiryTimer = setTimeout(() => removeUser(roomId, room, user), RECONNECT_GRACE_MS);
-      }
-      io.to(roomId).emit("users-update", publicUsers(room));
+      disconnectUser(roomId, room, user);
     });
   });
 
@@ -343,7 +467,14 @@ async function main() {
     ? Number(process.env.PORT) || 3001
     : Number(process.env.BACKEND_PORT) || 3001;
   const host = process.env.HOST || "0.0.0.0";
-  httpServer.listen(port, host, () => console.log(`> Socket.IO/media backend listening on ${host}:${port}`));
+  await new Promise((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(port, host, () => {
+      httpServer.off("error", reject);
+      console.log(`> Socket.IO/media backend listening on ${host}:${port}`);
+      resolve();
+    });
+  });
 
   async function handleMediaRequest(request, response, pathname, context) {
     const { fs, path, crypto, stream, streamPromises, rooms, allowedOrigins, mediaDir } = context;
@@ -423,11 +554,22 @@ async function main() {
         response.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "The room ended during upload." }));
         return;
       }
-      const previousPath = room.mediaPath;
-      room.mediaPath = tempPath;
-      room.mediaType = contentType;
-      if (previousPath) fs.promises.unlink(previousPath).catch((error) => console.error("Failed to remove replaced media:", error));
-      response.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ uploaded: true, bytes }));
+      if (!bytes) {
+        await fs.promises.unlink(tempPath).catch(() => {});
+        response.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "The uploaded file is empty." }));
+        return;
+      }
+      if (room.pendingMedia) {
+        clearTimeout(room.pendingMedia.timer);
+        fs.promises.unlink(room.pendingMedia.path).catch(() => {});
+      }
+      const pending = { id: crypto.randomUUID(), path: tempPath, type: contentType, timer: null };
+      pending.timer = setTimeout(() => {
+        if (room.pendingMedia === pending) room.pendingMedia = null;
+        fs.promises.unlink(tempPath).catch(() => {});
+      }, 60_000);
+      room.pendingMedia = pending;
+      response.writeHead(201, { "Content-Type": "application/json" }).end(JSON.stringify({ uploaded: true, bytes, mediaId: pending.id }));
       return;
     }
 
@@ -439,10 +581,17 @@ async function main() {
       response.writeHead(404).end("Media not found");
       return;
     }
+    const mediaPath = room.mediaPath;
+    const mediaType = room.mediaType;
+    const requestedVersion = new URL(request.url, "http://localhost").searchParams.get("v");
+    if (requestedVersion && requestedVersion !== room.mediaId) {
+      response.writeHead(404).end("This media has been replaced");
+      return;
+    }
 
     let stat;
     try {
-      stat = await fs.promises.stat(room.mediaPath);
+      stat = await fs.promises.stat(mediaPath);
     } catch {
       response.writeHead(404).end("Media not found");
       return;
@@ -457,10 +606,15 @@ async function main() {
         response.writeHead(416, { "Content-Range": `bytes */${stat.size}` }).end();
         return;
       }
-      if (match[1]) start = Number(match[1]);
-      if (match[2]) end = Math.min(Number(match[2]), end);
-      else if (!match[1]) start = Math.max(0, stat.size - Number(match[2]));
-      if (start > end || start >= stat.size) {
+      if (!match[1]) {
+        const suffixLength = Number(match[2]);
+        start = Math.max(0, stat.size - suffixLength);
+        if (!match[2] || !Number.isSafeInteger(suffixLength) || suffixLength <= 0) start = stat.size;
+      } else {
+        start = Number(match[1]);
+        if (match[2]) end = Math.min(Number(match[2]), end);
+      }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= stat.size) {
         response.writeHead(416, { "Content-Range": `bytes */${stat.size}` }).end();
         return;
       }
@@ -469,7 +623,7 @@ async function main() {
     const headers = {
       "Accept-Ranges": "bytes",
       "Content-Length": end - start + 1,
-      "Content-Type": room.mediaType || "application/octet-stream",
+      "Content-Type": mediaType || "application/octet-stream",
       "Cache-Control": "private, no-store",
     };
     if (status === 206) headers["Content-Range"] = `bytes ${start}-${end}/${stat.size}`;
@@ -478,7 +632,8 @@ async function main() {
       response.end();
       return;
     }
-    const fileStream = fs.createReadStream(room.mediaPath, { start, end });
+    const fileStream = fs.createReadStream(mediaPath, { start, end });
+    response.on("close", () => fileStream.destroy());
     fileStream.on("error", (error) => {
       console.error("Failed to stream room media:", error);
       if (!response.headersSent) response.writeHead(500);
@@ -489,6 +644,8 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Failed to start HomeTheater server:", error);
+  console.error(error.code === "EADDRINUSE"
+    ? "The backend port is already in use. Use npm run dev to reuse a running HomeTheater backend, or set a different BACKEND_PORT."
+    : `Failed to start HomeTheater server: ${error.message}`);
   process.exitCode = 1;
 });

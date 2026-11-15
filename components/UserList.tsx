@@ -7,6 +7,7 @@ import { LockKeyhole, LockKeyholeOpen } from "lucide-react";
 interface Props {
   isOwner: boolean;
   socket: Socket;
+  connected: boolean;
 }
 
 const ROOM_CAPACITY = 50;
@@ -42,7 +43,7 @@ function SignalIcon({ bars, color }: { bars: number; color: string }) {
   );
 }
 
-export default function UserList({ isOwner, socket }: Props) {
+export default function UserList({ isOwner, socket, connected }: Props) {
   const { users } = useRoomStore();
   const presentCount = users.filter((user) => user.isConnected !== false).length;
   const openSeats = Math.max(ROOM_CAPACITY - presentCount, 0);
@@ -57,9 +58,11 @@ export default function UserList({ isOwner, socket }: Props) {
 
   // Measure own ping every 3 seconds and broadcast it
   useEffect(() => {
+    if (!connected) return;
     const measure = () => {
       const start = Date.now();
-      socket.emit("ping", () => {
+      socket.timeout(5000).emit("ping", (error: Error | null) => {
+        if (error) return;
         const p = Date.now() - start;
         setPings((prev) => ({ ...prev, [socket.id!]: p }));
         socket.emit("broadcast-ping", { ping: p });
@@ -68,7 +71,7 @@ export default function UserList({ isOwner, socket }: Props) {
     measure();
     const interval = setInterval(measure, 3000);
     return () => clearInterval(interval);
-  }, [socket]);
+  }, [socket, connected]);
 
   // Listen for other users' pings
   useEffect(() => {
@@ -80,7 +83,7 @@ export default function UserList({ isOwner, socket }: Props) {
   }, [socket]);
 
   return (
-    <div className="p-4">
+    <div className="h-full overflow-y-auto overscroll-contain p-4" aria-label="People in this room">
       <div className="mb-5 rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4">
         <div className="mb-3 flex items-end justify-between">
           <div>
@@ -120,6 +123,7 @@ export default function UserList({ isOwner, socket }: Props) {
                 {u.isConnected === false && <span className="ml-1.5 text-[10px] text-zinc-500">offline</span>}
               </span>
               {u.uid && <span className="mt-0.5 text-[10px] font-mono text-zinc-600">{u.uid}</span>}
+              {u.isConnected && <span className={`mt-1 text-[10px] ${u.isReady ? "text-emerald-300" : "text-zinc-400"}`}>{u.isReady ? "Ready to watch" : "Getting ready"}</span>}
             </div>
 
             {/* Ping + signal for all users */}
@@ -137,6 +141,8 @@ export default function UserList({ isOwner, socket }: Props) {
             {/* Owner-only temporary interaction restriction */}
             {isOwner && !isMe && (
               <button
+                disabled={!connected}
+                aria-label={`${u.isBlocked ? "Unblock" : "Restrict"} ${u.username}`}
                 onClick={() => u.uid && socket.emit("set-blocked", { participantId: u.uid, blocked: !u.isBlocked })}
                 className={`rounded-lg p-2 transition-colors ${u.isBlocked ? "text-amber-400 hover:bg-amber-400/10 hover:text-amber-300" : "text-zinc-600 hover:bg-white/[0.06] hover:text-amber-400"}`}
                 title={u.isBlocked ? "Unblock participant" : "Temporarily block chat and controls"}

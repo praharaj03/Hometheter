@@ -6,11 +6,13 @@
     "node": ">=20.9.0"
   },
   "scripts": {
-    "dev": "next dev",
-    "dev:backend": "node --env-file=.env server.js",
+    "dev": "node scripts/dev.mjs",
+    "dev:frontend": "next dev",
+    "dev:backend": "node scripts/dev.mjs --backend-only",
     "build": "next build",
     "start": "node server.js --production",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test tests/backend.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.7.0",
@@ -22,6 +24,7 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@next/env": "16.4.2",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
